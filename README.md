@@ -1,0 +1,1 @@
+# The repository to calculate amino acid distributions of reads around the ORF
