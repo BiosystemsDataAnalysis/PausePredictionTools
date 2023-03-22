@@ -4,9 +4,9 @@
 
 ## required packages ipython, pandas, numpy, biopython, plotly and typed-argument-parser
 
-usage: run_a_site_analysis.py --sam SAM --gff GFF --fa FA [--nc NC] [--mq MQ] [--o53 O53] [--o35 O35] [--title TITLE] [--log] [--op OP] [-h]
+usage: run_a_site_analysis.py --sam SAM --gff GFF --fa FA [--nc NC] [--mq MQ] [--o53 O53] [--o35 O35] [--title TITLE] [--log] [--op OP] [-h]  
 
-options:
+options:  
   --sam SAM      (str, required) the input sam(or bam) file  
   --gff GFF      (str, required) the file with gene definitions  
   --fa FA        (str, required) the file with nucleotide sequences  
