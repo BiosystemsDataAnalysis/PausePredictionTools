@@ -6,7 +6,7 @@ import sys
 import subprocess
 import pkg_resources
 import tempfile   
-from os.path import exists
+from os.path import exists, dirname, realpath, basename, join
 from map_functions import *
 import multiprocessing
 from collections import Counter
@@ -69,11 +69,11 @@ def load_sam_file(sam_file_name:str="", saveFormatted:bool=False)->pd.DataFrame:
         print("{0} not found, please enter valid file name/path".format(sam_file_name))
 
     sam_file = sam_file_name
-    pkl_file = sam_file.replace(".sam",".pkl")
+    pkl_file = sam_file.lower().replace(".sam",".pkl")
     load_sam_data_from_pkl_file = exists(pkl_file)
 
-    val = ["is not","is"]
-    print("The **sam** data **{0}** loaded from previous results".format(val[load_sam_data_from_pkl_file]))
+    # val = ["is not","is"]
+    # print("The **sam** data **{0}** loaded from previous results".format(val[load_sam_data_from_pkl_file]))
 
     # load data from sam file ..
     if not(load_sam_data_from_pkl_file):        
@@ -291,10 +291,11 @@ def add_aa_scores(dfin:pd.DataFrame,aa:str='I',offset35:int=12,offset53:int=14):
     return dfin
 
 #%% the main plot routine
-def make_plots(dfw:pd.DataFrame, pkl_file_name:str, sample_type:str="",offset35:int=12,offset53:int=14):
+def make_plots(dfw:pd.DataFrame, pkl_file_name:str, output_path="", sample_type:str="",offset35:int=12,offset53:int=14):
     kys_,cdns_ = get_genetic_code()
     
-    output_file_name = pkl_file_name.replace(".pkl","_with_AAs.pkl")
+    
+    output_file_name = join(output_path,pkl_file_name.replace(".pkl","_with_AAs.pkl"))
     
     if exists(output_file_name):
         print("reading input data from previously generated data {0}".format(output_file_name))
@@ -325,9 +326,11 @@ def make_plots(dfw:pd.DataFrame, pkl_file_name:str, sample_type:str="",offset35:
     work_data = df_n_m
     plot_data = work_data[(work_data.position>=-offset35) & (work_data.position<=offset53)]
 
-    # plot 1
+    if sample_type == "" :
+        sample_type = pkl_file_name.replace(".pkl","")
+
     _title = r"A-site position relative to first codon of different amino acids " + \
-    "in {0} sample determined with +{1}/-{2} offsets".format(sample_type,offset53,offset35)
+    "in sample ({0}) determined with +{1}/-{2} offsets".format(sample_type,offset53,offset35)
 
     fig = px.bar(data_frame=plot_data,x='position',y='counts',color='amino acid',facet_col="serie",animation_frame='condition', barmode='group')
     fig["layout"].pop("updatemenus") # optional, drop animation buttons
@@ -335,9 +338,11 @@ def make_plots(dfw:pd.DataFrame, pkl_file_name:str, sample_type:str="",offset35:
     xaxis_dict = dict(tickmode = 'linear',tick0 = 0,dtick = 3)
     fig.update_layout(title_text=_title,xaxis=xaxis_dict,xaxis2=xaxis_dict)
 
-    fig.show();
-    file_name_html = output_file_name.strip(".pkl")+"_all_{0}_{1}_wo_sel.html".format(offset53,offset35)
+    file_name_html = output_file_name.replace(".pkl","_all_{0}_{1}.html".format(offset53,offset35))
     fig.write_html(file_name_html)
+    print("output written to {0}".format(file_name_html))
+
+   
 
 
 
@@ -355,16 +360,17 @@ if interactive_mode:
 
 class myargs(Tap):
     
-    sam_file: str  # the input sam(or bam) file
-    gff_file: str # the file with gene definitions
-    fasta_file: str # the file with nucleotide sequences
-    #output_file:str # the output pkl file
-    nr_cores: int=1 # the number of cores to use
+    sam: str  # the input sam(or bam) file
+    gff: str # the file with gene definitions
+    fa: str # the file with nucleotide sequences    
+    nc: int=1 # the number of cores to use
     mq:int=41 # the minimum mapping quality of a read
-    si:bool=False # save the intermediate results to (pkl) file
+    #si:bool=False # save the intermediate results to (pkl) file
     o53:int=14 # the offset from 5->3 direction
     o35:int=12 # the offset from 3->5 direction
+    title:str="" # the sample title
     log:bool=False # create a log file
+    op:str="" # output folder, if not specified same as folder where sam resides
     
 
 
@@ -372,29 +378,41 @@ class myargs(Tap):
 if __name__ ==  '__main__': 
     
     args = myargs().parse_args()        
-    sam_file_name = args.sam_file
-    output_file_name = args.sam_file.lower().replace(".sam","_ASITE.pkl")
+    sam_file_name = args.sam
+    output_file_name = sam_file_name.lower().replace(".sam","_ASITE.pkl")
+    sam_file_name_base = basename(args.sam)
+
+    dir_path = dirname(realpath(output_file_name))
+    if args.op != "":
+        dir_path = args.op 
+
+        if not(exists(dir_path)):
+            print("Error, the output path {0} does not exist, alter or create".format(dir_path))
+            exit(1)
+
+    output_file_name = basename(output_file_name)
+    output_file_full = join(dir_path,output_file_name)
 
     print('processing file {0}'.format(sam_file_name))
 
-    if args.log:
-        (fd, filename) = tempfile.mkstemp()
+    if args.log:    
         temp_stdout = sys.stdout
-        print("logging to file {0}".format(filename))
-        sys.stdout = open("./"+filename,'wt')
+        logfile = join(dir_path,sam_file_name_base.lower().replace(".sam",".log"))
+        print("logging to file {0}".format(logfile))
+        sys.stdout = open(logfile,'wt')
 
 
-    if not(exists(output_file_name)):
+    if not(exists(output_file_full)):
 
-        fasta_str = load_fasta_file(args.fasta_file)
-        gns = load_gene_defs(fasta_str, args.gff_file)
-        df_sam = load_sam_file(sam_file_name, args.si)
+        fasta_str = load_fasta_file(args.fa)
+        gns = load_gene_defs(fasta_str, args.gff)
+        df_sam = load_sam_file(sam_file_name, False) # args.si
         #     #  filter the reads with low mapping quality
         df_work_data = df_sam[df_sam.qual >= args.mq].copy()
 
-        maxcpu = args.nr_cores             
+        maxcpu = args.nc             
         maxcpu = min(multiprocessing.cpu_count(),maxcpu)
-        print('running on {0} threads'.format(maxcpu))
+        print('{0} cores/threads detected, running on {1} threads'.format(multiprocessing.cpu_count(),maxcpu))
 
         blocksize = df_work_data.shape[0]//maxcpu
         blocks = {}
@@ -430,14 +448,14 @@ if __name__ ==  '__main__':
                 normal_reads += dct_normal[i]
                 reverse_read += dct_reverse[i]
         
-        df.to_pickle(output_file_name)
+        df.to_pickle(output_file_full)
     
     else:        
-        print("reading from previous results {0}".format(output_file_name))
-        df = pd.read_pickle(output_file_name)
+        print("reading from previous results {0}".format(output_file_full))
+        df = pd.read_pickle(output_file_full)
 
 
-    make_plots(df, output_file_name, offset35=args.o35, offset53=args.o53)
+    make_plots(df, output_file_name, dir_path, sample_type=args.title, offset35=args.o35, offset53=args.o53)
 
     if args.log:
         sys.stdout = temp_stdout
