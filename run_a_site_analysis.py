@@ -58,62 +58,46 @@ def load_gene_defs(fasta_str:str="", gff_file:str=""):
     
     return gns
 
-
-def load_sam_file(sam_file_name:str="", saveFormatted:bool=False)->pd.DataFrame:
+def count_lines_in_file(file_name:str="")->int:
+    ''' count the number of lines in a text file
     '''
-    Load the sam file to pandas dataframe 
-    saveFormatted:bool - save the intermediate data to a pkl file for faster processing at a later stage, default False
-    '''
+    count = 0
+    with open(file_name,'r') as f:
+      for _ in f:
+        count += 1
+    return count
 
-    if not(exists(sam_file_name)):
-        print("{0} not found, please enter valid file name/path".format(sam_file_name))
 
+def get_sam_data_block(sam_file_name:str="", chunksize:int=10_000)->pd.DataFrame:
+    
     sam_file = sam_file_name
-    pkl_file = sam_file.lower().replace(".sam",".pkl")
-    load_sam_data_from_pkl_file = exists(pkl_file)
-
-    # val = ["is not","is"]
-    # print("The **sam** data **{0}** loaded from previous results".format(val[load_sam_data_from_pkl_file]))
-
-    # load data from sam file ..
-    if not(load_sam_data_from_pkl_file):        
-
-        print('determining headers sam file ... ')
-        headers = []
-        f = open(sam_file,'r')
-        # determine number of header lines
-        for l in f:
-            if l.startswith('@'):
-                headers.append(l)
-            else:
-                break
-        f.close()
-        nr_headers = len(headers)
-
-        cols = ['C{0}'.format(i + 1) for i in range(20)]    
+    f = open(sam_file,'r')
+    print('determining headers sam file ... ')
+    headers = []
+    # determine number of header lines
+    for l in f:
+        if l.startswith('@'):
+            headers.append(l)
+        else:
+            break
+    f.close()
+    nr_headers = len(headers)
+    
+    cols = ['C{0}'.format(i + 1) for i in range(20)]        
         
-        df_sam = pd.read_csv(sam_file, sep='\t', skiprows=nr_headers, header=None, names=cols, engine='python')
+    for df_sam in pd.read_csv(sam_file, sep='\t', skiprows=nr_headers, header=None, names=cols, chunksize=chunksize, engine='python'):
         df_sam.rename(columns={'C5': 'qual', 'C10': 'sam_str', 'C2': 'dir', 'C4': 'left_pos', 'C11': 'phred_scores'},inplace=True)
         df_sam = df_sam.drop(['C6','C7','C8','C9','C12','C13','C14','C15','C16','C17','C18','C19','C20'],axis=1)
+        yield df_sam
         
-        df_sam.left_pos = df_sam.left_pos.astype('int')
-        df_sam.qual = df_sam.qual.astype('int')
-
-        if saveFormatted:
-            df_sam.to_pickle(pkl_file)
-    else:
-        df_sam = pd.read_pickle(pkl_file)
-
-    return df_sam
 
 
-
-def mythreadfunc(index,df_work,multi_dict_,d_normal,d_reverse,blocks,fasta_str,gns,offset35:int=12,offset53:int=14):
-        rng = range(blocks[index][0],blocks[index][1])
-        reg_out,nrm_out,rev_out = process_sam_data(df_work.iloc[rng],fasta_str,gns, index, offset35,offset53)
-        multi_dict_[index] = reg_out
-        d_normal[index]=nrm_out
-        d_reverse[index]=rev_out
+def mythreadfunc_block(index,df_work,multi_dict_,d_normal,d_reverse,fasta_str,gns,sema,offset35:int=12,offset53:int=14):        
+    reg_out,nrm_out,rev_out = process_sam_data(df_work,fasta_str,gns, index, offset35,offset53)
+    multi_dict_[index] = reg_out
+    d_normal[index]=nrm_out
+    d_reverse[index]=rev_out
+    sema.release()
 
 #%% define the plot functions
 
@@ -291,13 +275,13 @@ def add_aa_scores(dfin:pd.DataFrame,aa:str='I',offset35:int=12,offset53:int=14):
     return dfin
 
 #%% the main plot routine
-def make_plots(dfw:pd.DataFrame, pkl_file_name:str, output_path="", sample_type:str="",offset35:int=12,offset53:int=14):
+def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path="", sample_type:str="",offset35:int=12,offset53:int=14):
     kys_,cdns_ = get_genetic_code()
     
     
     output_file_name = join(output_path,pkl_file_name.replace(".pkl","_with_AAs.pkl"))
     
-    if exists(output_file_name):
+    if (exists(output_file_name)) and (not(overwrite)):
         print("reading input data from previously generated data {0}".format(output_file_name))
         dfm = pd.read_pickle(output_file_name)
     else:
@@ -316,7 +300,7 @@ def make_plots(dfw:pd.DataFrame, pkl_file_name:str, output_path="", sample_type:
 
     file_name_pickle = output_file_name.replace(".pkl","plot_data_{0}_{1}.pkl".format(offset53,offset35))
 
-    if exists(file_name_pickle):
+    if (exists(file_name_pickle)) and (not(overwrite)):
         print("reading data from previously generated file {0}".format(file_name_pickle))
         df_n_m = pd.read_pickle(file_name_pickle)
     else:
@@ -364,6 +348,7 @@ class myargs(Tap):
     gff: str # the file with gene definitions
     fa: str # the file with nucleotide sequences    
     nc: int=1 # the number of cores to use
+    nb: int=1 # in how many parts the sam file is split
     mq:int=41 # the minimum mapping quality of a read
     #si:bool=False # save the intermediate results to (pkl) file
     o53:int=14 # the offset from 5->3 direction
@@ -371,9 +356,9 @@ class myargs(Tap):
     title:str="" # the sample title
     log:bool=False # create a log file
     op:str="" # output folder, if not specified same as folder where sam resides
-    
+    ow:bool=False # overwrite existing output
 
-
+# semaphore from https://stackoverflow.com/questions/20886565/using-multiprocessing-process-with-a-maximum-number-of-simultaneous-processes
 # add this line for processing in multiple threads
 if __name__ ==  '__main__': 
     
@@ -381,6 +366,8 @@ if __name__ ==  '__main__':
     sam_file_name = args.sam
     output_file_name = sam_file_name.lower().replace(".sam","_ASITE.pkl")
     sam_file_name_base = basename(args.sam)
+    nr_blocks = args.nb
+
 
     dir_path = dirname(realpath(output_file_name))
     if args.op != "":
@@ -401,43 +388,48 @@ if __name__ ==  '__main__':
         print("logging to file {0}".format(logfile))
         sys.stdout = open(logfile,'wt')
 
-
-    if not(exists(output_file_full)):
+    if args.ow:
+        print("Overwriting exsiting output")
+    
+    if not(exists(output_file_full)) or (args.ow):
 
         fasta_str = load_fasta_file(args.fa)
         gns = load_gene_defs(fasta_str, args.gff)
-        df_sam = load_sam_file(sam_file_name, False) # args.si
-        #     #  filter the reads with low mapping quality
-        df_work_data = df_sam[df_sam.qual >= args.mq].copy()
-
+               
         maxcpu = args.nc             
         maxcpu = min(multiprocessing.cpu_count(),maxcpu)
         print('{0} cores/threads detected, running on {1} threads'.format(multiprocessing.cpu_count(),maxcpu))
-
-        blocksize = df_work_data.shape[0]//maxcpu
-        blocks = {}
-        for b in range(maxcpu):
-            blocks[b]=[(b)*blocksize,(b+1)*blocksize]
-
-        blocks[b]=[blocks[b][0],df_work_data.shape[0]]
-
-        print("nr cpus = {0}".format(maxcpu))
+        
+        concurrency = maxcpu
+        total_task_num = nr_blocks
+        
+        # create semaphore object 
+        sema = multiprocessing.Semaphore(concurrency)
             
         multiprocessing_dict = multiprocessing.Manager().dict()
         dct_normal = multiprocessing.Manager().dict()
         dct_reverse = multiprocessing.Manager().dict()
         multiprocessing_loop_  = []
 
-        for c in range(maxcpu):    
-            _process = multiprocessing.Process(target=mythreadfunc, args=(c,df_work_data, multiprocessing_dict,dct_normal,dct_reverse,blocks,fasta_str,gns,args.o35,args.o53))
+        # determine block sizes based on number of blocks argument
+
+        file_lines = count_lines_in_file(sam_file_name)
+        chuncksize = file_lines // nr_blocks    
+
+        c = 0
+        for df_chunk in get_sam_data_block(sam_file_name, chunksize=chuncksize):
+            #  filter the reads with low mapping quality
+            _df_sam = df_chunk[df_chunk.qual >= args.mq].copy()
+            # countdown available semaphores
+            sema.acquire()
+            _process = multiprocessing.Process(target=mythreadfunc_block, args=(c,_df_sam, multiprocessing_dict,dct_normal,dct_reverse,fasta_str,gns,sema,args.o35,args.o53))
+            c+=1
             multiprocessing_loop_.append(_process)
+            _process.start()
         
         for process_  in multiprocessing_loop_ :
-            process_.start()
-
-        for process_  in multiprocessing_loop_ :
             process_.join()
-
+        
         df = multiprocessing_dict[0].copy()
         normal_reads = dct_normal[0].copy()
         reverse_read = dct_reverse[0].copy()
@@ -455,7 +447,7 @@ if __name__ ==  '__main__':
         df = pd.read_pickle(output_file_full)
 
 
-    make_plots(df, output_file_name, dir_path, sample_type=args.title, offset35=args.o35, offset53=args.o53)
+    make_plots(df, output_file_name,  overwrite=args.ow, output_path=dir_path, sample_type=args.title, offset35=args.o35, offset53=args.o53)
 
     if args.log:
         sys.stdout = temp_stdout
