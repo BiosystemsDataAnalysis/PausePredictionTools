@@ -382,10 +382,12 @@ def make_ORF_plot(fname:str,_op:str, dfm:pd.DataFrame=None,filter:ORF_FILTER=ORF
     # xaxis_dict = dict(tickmode = 'linear',tick0 = 0,dtick = 3)
     fig.update_layout(title_text=_title)
 
-    fig.show()
-    fname=fname.replace('.pkl','_sCDS.html')
+    # fig.show()
 
+    fname=join(_op,fname.replace("_ASITE.pkl","_sCDS.html"))    
     fig.write_html(fname)
+
+    print("output file written to {0}".format(fname))
 
 
 
