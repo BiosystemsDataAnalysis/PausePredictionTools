@@ -23,7 +23,12 @@ from IPython.core.interactiveshell import InteractiveShell
 InteractiveShell.ast_node_interactivity = "all"
 
 import plotly.express as px
+import plotly.graph_objects as go
 
+from tap import Tap # typed-argument-parser
+import sys
+interactive_mode = hasattr(sys, 'ps1')
+from enum import IntEnum
 
 #%% define the functions
 def load_fasta_file(fasta_file_loc:str=""):  
@@ -243,6 +248,147 @@ def createAsiteDistributionPlotData(df_in:pd.DataFrame):
     return df_reads_
 
 
+
+def make_ORF_data(dataIn:pd.DataFrame,dir53:bool=True):
+
+    if dir53:
+        _lbl = '5->3'
+        #posAsite = 'posAsite53'
+        dataIn = dataIn[dataIn.direction==53].copy()
+
+    if not dir53:
+        _lbl = '3->5'
+        dataIn = dataIn[dataIn.direction==35].copy()
+        #posAsite = 'posAsite35'
+
+    print("reformating to ORF plot data direction {0}".format(_lbl))
+
+    # dfm_wrk = dataIn.groupby([posAsite,'dir']).count()['C1'].reset_index()
+    dfm_wrk = dataIn.groupby(['posAsite','dir']).count()['count'].reset_index()
+    
+    df_plot = dfm_wrk[(dfm_wrk['posAsite']>-50) & (dfm_wrk['posAsite']<50) ].copy()
+    df_plot.columns = ['position','dir','count']
+    total_plot = df_plot.groupby('position').sum()['count'].reset_index()
+    total_plot['series']=_lbl + ' (total)'
+
+    df_plot['series']=_lbl
+    df_plot.loc[df_plot.dir==16,'series']=_lbl+'(*)'
+    #df_plot['series'].loc[df_plot.dir==16]=_lbl+'(*)'
+
+    dataIn = dataIn[dataIn.direction=='35'].copy().drop(columns=['dir'],axis=1,inplace=True)
+    
+    return df_plot,total_plot
+   
+
+class ORF_FILTER(IntEnum):
+    NONE = 0
+    MTOP10 = 1
+    MTOP20 = 2
+    MTOP50 = 3
+    L10 = 4
+
+def prepare_ORF_plot_data(fname:str, dfm:pd.DataFrame, _op:str, filter:ORF_FILTER=ORF_FILTER.NONE):
+    
+    output_file_name = join(_op,fname.replace("_ASITE.pkl","_ORF_unfiltered_data.pkl"))
+    if (exists(output_file_name)):
+        print("reading ORF data from previously generated results {0}".format(output_file_name))
+        dfm_tot = pd.read_pickle(output_file_name)
+    
+    else:
+        print("preparing data for ORF plots... ")
+    
+        dfm_35 = dfm.groupby(['posAsite35','dir','gene']).agg(['count','min'])['gene_len'].reset_index()
+        dfm_53 = dfm.groupby(['posAsite53','dir','gene']).agg(['count','min'])['gene_len'].reset_index()
+
+        dfm_35['relfreq']=dfm_35['count']/dfm_35['min']
+        dfm_53['relfreq']=dfm_53['count']/dfm_53['min']
+    
+
+        dfm_tot = pd.concat([dfm_35,dfm_53],axis=0)
+        dfm_tot['direction']=35
+        dfm_tot.loc[np.isnan(dfm_tot.posAsite35),'direction']=53
+        dfm_tot.direction=dfm_tot.direction.astype('int')
+
+        dfm_tot['posAsite'] = dfm_tot.posAsite53.fillna(0)+dfm_tot.posAsite35.fillna(0)
+        dfm_tot = dfm_tot.drop(columns=['posAsite35','posAsite53'],axis=1)
+
+        dfm_tot.to_pickle(output_file_name)
+
+
+    #create datasets based on filter        
+
+    # all data
+    dfm_35 = df_pd_35 = dfm_tot[dfm_tot.direction==35].copy()
+    dfm_53 = df_pd_53 = dfm_tot[dfm_tot.direction==53].copy()
+
+    # excluding top 10
+    if filter==ORF_FILTER.MTOP10:
+        top10_35 = dfm_35.groupby('gene').count().sort_values('relfreq',ascending=False).iloc[0:10].index
+        top10_53 = dfm_53.groupby('gene').count().sort_values('relfreq',ascending=False).iloc[0:10].index
+        df_pd_35 = dfm_35[~dfm_35.gene.isin(top10_35)]
+        df_pd_53 = dfm_53[~dfm_53.gene.isin(top10_53)]
+
+    # excluding top 20
+    if filter==ORF_FILTER.MTOP20:
+        top20_35 = dfm_35.groupby('gene').count().sort_values('relfreq',ascending=False).iloc[0:20].index
+        top20_53 = dfm_53.groupby('gene').count().sort_values('relfreq',ascending=False).iloc[0:20].index
+        df_pd_35 = dfm_35[~dfm_35.gene.isin(top20_35)]
+        df_pd_53 = dfm_53[~dfm_53.gene.isin(top20_53)]
+
+    # excluding top 50
+    if filter==ORF_FILTER.MTOP50:
+        top50_35 = dfm_35.groupby('gene').count().sort_values('relfreq',ascending=False).iloc[0:50].index
+        top50_53 = dfm_53.groupby('gene').count().sort_values('relfreq',ascending=False).iloc[0:50].index
+        df_pd_35 = dfm_35[~dfm_35.gene.isin(top50_35)]
+        df_pd_53 = dfm_53[~dfm_53.gene.isin(top50_53)]
+
+    if filter==ORF_FILTER.L10:
+        # less than 10 reads
+        grouped35 = dfm_35.groupby('gene')
+        more_than_10_35 = grouped35.filter(lambda x:x['relfreq'].count()>10).gene.unique()
+        grouped53 = dfm_53.groupby('gene')
+        more_than_10_53 = grouped53.filter(lambda x:x['relfreq'].count()>10).gene.unique()
+        df_pd_35 =  dfm_35[~dfm_35.gene.isin(more_than_10_35)]
+        df_pd_53 =  dfm_53[~dfm_53.gene.isin(more_than_10_53)]
+
+    # create plot data, min top10
+    df_plot35, df_total35 = make_ORF_data(df_pd_35,False)
+    df_plot53, df_total53 = make_ORF_data(df_pd_53)
+
+    # combine the 2 datasets to 1 figure, perhaps skip the detailed bars (df_plot35 & df_plot53)
+    df_plot_total= pd.concat([df_total35,df_total53],axis=0)
+    df_plot_detail = pd.concat([df_plot35,df_plot53],axis=0)
+
+    return df_plot_total, df_plot_detail
+
+
+def make_ORF_plot(fname:str,_op:str, dfm:pd.DataFrame=None,filter:ORF_FILTER=ORF_FILTER.NONE):
+    
+    df_total, df_detail = prepare_ORF_plot_data(fname, dfm, _op, filter)
+
+    fig = px.bar(data_frame=df_detail,x='position',y='count',color="series", barmode='overlay')
+    _flt = df_total.series == '3->5 (total)'
+    fig.add_traces(go.Scatter(x=df_total[_flt].position, y=df_total[_flt]['count'], mode = 'lines',name='3->5 (total)'))
+
+    _flt = df_total.series == '5->3 (total)'
+    fig.add_traces(go.Scatter(x=df_total[_flt].position, y=df_total[_flt]['count'], mode = 'lines',name='5->3 (total)'))
+
+    _title = "distribution plot around ORF"
+    #_title = 'chloramphenicol (16h) sample min top 10 genes'
+    # _title = 'mupirocin sample min top 10 genes'
+
+    fig["layout"].pop("updatemenus") # optional, drop animation buttons
+    fig.update_traces(dict(marker_line_width=0))
+    # xaxis_dict = dict(tickmode = 'linear',tick0 = 0,dtick = 3)
+    fig.update_layout(title_text=_title)
+
+    fig.show()
+    fname=fname.replace('.pkl','_sCDS.html')
+
+    fig.write_html(fname)
+
+
+
 def add_aa_scores(dfin:pd.DataFrame,aa:str='I',offset35:int=12,offset53:int=14):
     
     # copy I data vectors and determine distances to reads and I position, in detpos the offsets are determined 
@@ -297,7 +443,8 @@ def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path=
         print("storing data in {0}".format(output_file_name))
         dfm.to_pickle(output_file_name)
 
-
+    make_ORF_plot(pkl_file_name,output_path,dfm,ORF_FILTER.NONE)
+    
     file_name_pickle = output_file_name.replace(".pkl","plot_data_{0}_{1}.pkl".format(offset53,offset35))
 
     if (exists(file_name_pickle)) and (not(overwrite)):
@@ -328,8 +475,6 @@ def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path=
 
    
 
-
-
 #%% the main routine for processing
 from tap import Tap # typed-argument-parser
 import sys
@@ -339,8 +484,7 @@ interactive_mode = hasattr(sys, 'ps1')
 #fasta_file = "./reference_files/WT-Prspb-amyI-FASTA.fa"
 
 if interactive_mode:
- sys.argv = ['script.py', '--sam_file', './input/1X_PEG-Spin_filtered_SAM.sam', 'output_file','./output/1X_PEG-Spin_filtered.pkl']
-#  sys.argv = ['script.py', '--input_file', 'test_out.sam','--fasta_file','WT-Prspb-amyI-FASTA.fa']
+    sys.argv = ['script','--sam','data/1X_PEG-Spin_filtered_SAM.sam','--gff', 'reference_files/wt-prspb-amyI-GFF3.gff','--fa',r'reference_files/WT-Prspb-amyI-FASTA.fa']
 
 class myargs(Tap):
     
