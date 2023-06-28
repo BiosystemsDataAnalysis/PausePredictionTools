@@ -421,9 +421,8 @@ def add_aa_scores(dfin:pd.DataFrame,aa:str='I',offset35:int=12,offset53:int=14):
     return dfin
 
 #%% the main plot routine
-def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path="", sample_type:str="",offset35:int=12,offset53:int=14):
+def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path="", sample_type:str="",offset35:int=12,offset53:int=14, orfplots:bool=False):
     kys_,cdns_ = get_genetic_code()
-    
     
     output_file_name = join(output_path,pkl_file_name.replace(".pkl","_with_AAs.pkl"))
     
@@ -443,7 +442,8 @@ def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path=
         print("storing data in {0}".format(output_file_name))
         dfm.to_pickle(output_file_name)
 
-    make_ORF_plot(pkl_file_name,output_path,dfm,ORF_FILTER.NONE)
+    if orfplots:
+        make_ORF_plot(pkl_file_name,output_path,dfm,ORF_FILTER.NONE)
     
     file_name_pickle = output_file_name.replace(".pkl","plot_data_{0}_{1}.pkl".format(offset53,offset35))
 
@@ -501,6 +501,7 @@ class myargs(Tap):
     log:bool=False # create a log file
     op:str="" # output folder, if not specified same as folder where sam resides
     ow:bool=False # overwrite existing output
+    orf:bool=False # include ORF plots
 
 # semaphore from https://stackoverflow.com/questions/20886565/using-multiprocessing-process-with-a-maximum-number-of-simultaneous-processes
 # add this line for processing in multiple threads
@@ -591,7 +592,7 @@ if __name__ ==  '__main__':
         df = pd.read_pickle(output_file_full)
 
 
-    make_plots(df, output_file_name,  overwrite=args.ow, output_path=dir_path, sample_type=args.title, offset35=args.o35, offset53=args.o53)
+    make_plots(df, output_file_name,  overwrite=args.ow, output_path=dir_path, sample_type=args.title, offset35=args.o35, offset53=args.o53, orfplots=args.orf)
 
     if args.log:
         sys.stdout = temp_stdout
