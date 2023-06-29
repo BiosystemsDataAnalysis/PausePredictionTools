@@ -17,4 +17,5 @@ options:
   --title TITLE  (str, default=) the sample title  
   --log          (bool, default=False) write output to a log file  
   --op OP        (str, default=) output folder, if not specified same as folder where sam resides  
+  --orf          (bool, default=False) generate ORF plots
   -h, --help     show this help message and exit  
