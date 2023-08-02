@@ -11,7 +11,7 @@ options:
   --gff GFF      (str, required) the file with gene definitions  
   --fa FA        (str, required) the file with nucleotide sequences  
   --nc NC        (int, default=1) the number of cores to use  
-  --nb NB        (int, default=1) the number of blocks to use (NC<=NB) 
+  --nb NB        (int, default=1) the number of blocks to use (NC<=NB)  
   --mq MQ        (int, default=41) the minimum mapping quality of a read  
   --o53 O53      (int, default=14) the offset from 5->3 direction  
   --o35 O35      (int, default=12) the offset from 3->5 direction  
