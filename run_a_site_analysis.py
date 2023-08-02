@@ -549,7 +549,11 @@ if __name__ ==  '__main__':
         
         concurrency = maxcpu
         total_task_num = nr_blocks
-        
+
+        if maxcpu>nr_blocks:
+            print("nr of blocks {0} is smaller than number of threads {1} reserved, decreasing number of threads to number of blocks".format(nr_blocks,maxcpu))
+            maxcpu = nr_blocks
+                                    
         # create semaphore object 
         sema = multiprocessing.Semaphore(concurrency)
             
