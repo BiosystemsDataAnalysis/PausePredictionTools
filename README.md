@@ -40,5 +40,5 @@ options:
   --down_offset DOWN_OFFSET     (int, default=12) the offset when read from the 3' end.  
   --up_offset UP_OFFSET         (int, default=14) the offset when read from the 5' end.  
   --min_qual MIN_QUAL           (int, default=42) the minimum mapping quality of the reads.  
-  --nlines NLINES               (int, default=1000000) the number of lines to be processed in a single block.  
+  --nlines NLINES               (int, default=1_000_000) the number of lines to be processed in a single block.  
   -h, --help                    show this help message and exit.  
