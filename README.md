@@ -24,6 +24,9 @@ options:
   --log          (bool, default=False) write output to a log file  
   --op OP        (str, default=) output folder, if not specified same as folder where sam resides  
   --orf          (bool, default=False) generate ORF plots  
+  --csv          (bool, default=False) export plot data to csv file
+  --verbose:     (bool, default=False) # show extra logging information, useful for debugging
+  --lim          (float, default=0.8) # set memory limit, throws error if exceeded    
   -h, --help     show this help message and exit  
 
 ### ALT_PREDICT_V2.PY, alternative pause prediction tool to Ribogalaxy
