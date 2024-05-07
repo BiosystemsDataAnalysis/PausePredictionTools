@@ -242,6 +242,191 @@ def get_gene_AAs(agene, aAA):
     gene_aas = gene[aAA]
     return gene_aas.values[0]
 
+# https://builtin.com/data-science/how-to-speed-up-pandas
+
+# https://stackoverflow.com/questions/68547194/apply-numpy-where-along-one-of-axes
+
+
+
+
+def where(arr):
+    # check for those items that are empty
+    adj = np.sum(arr, axis=1) == 0
+    cs = np.cumsum(arr,axis=1)
+    x = np.argmax(cs, axis=1) - adj
+    # set those items that have multiple genes to false
+    x[cs.max(axis=1)>1]=-1
+    return x
+
+def process_sam_vectorized(blk_in, fasta_str, gns_info, index=0,offset35:int=12,offset53:int=14,verbose=False):
+    
+    try:
+    
+        gns_def = gns_info['DEF']
+        ROISTART = gns_info['ROISTART']
+        ROISTOP = gns_info['ROISTOP']
+        GENESTART=gns_info['GENESTART']
+        GENESTOP=gns_info['GENESTOP']
+        GENESTRANDS=gns_info['GENESTRANDS']
+        NP_AA=gns_info['NP_AA']
+        AA_dict=gns_info['AA_DICT']
+
+        def get_fasta_part(l,r):        
+            _fs = fasta_str[l-1:r]        
+            return _fs
+
+        def get_revCompl(aStr,rev):        
+            _fs = aStr
+            if rev:
+                _fs = revCompl(_fs)        
+            return _fs
+
+        print('processing sam data (block {0}) ...'.format(index+1))   
+        
+        if verbose:
+            print("copy data ..")
+        blk = blk_in.copy()
+        gs = np.array(GENESTRANDS)
+
+        if verbose:
+            print("determine the (stranded) ends of the reads .. {0}".format(index+1))
+        
+        blk['read_len'] = blk.sam_str.str.len()
+        blk['right_pos'] = blk.left_pos + blk.read_len - 1    
+
+        if verbose:
+            print('determining reverse complements data (block {0}) ...'.format(index+1))
+        
+        blk['read_str'] = list(map(get_revCompl, blk.sam_str,blk.dir))
+        blk['fasta_match'] = list(map(get_fasta_part,blk.left_pos,blk.right_pos))
+        
+        blk['begin_read'] = (blk.dir==0)*blk.left_pos + (blk.dir==16)*blk.right_pos
+        blk['end_read'] = (blk.dir==0)*blk.right_pos + (blk.dir==16)*blk.left_pos
+        
+        # blk.apply(
+        #     lambda row: (row.begin_read + row.read_len - 1) if row.dir == 0 
+        #     else (row.begin_read - (row.read_len - 1)), axis=1)
+
+        f_start_0  = lambda row: (row.begin_read  >= GENESTART)
+        f_end_0    = lambda row: (row.end_read    <= GENESTOP) 
+        
+        f_start_16 = lambda row: (row.end_read   >= GENESTART) 
+        f_end_16   = lambda row: (row.begin_read <= GENESTOP) 
+            
+        if verbose:
+            print("match regions of interest {0} .. ".format(index+1))   
+
+        df_roi_0  = blk.apply(lambda row: (row.begin_read >= ROISTART) & ((row.end_read) <= ROISTOP),axis=1)
+        df_roi_16 = blk.apply(lambda row: (ROISTART >= row.begin_read) & (ROISTOP <= (row.end_read)),axis=1)        
+
+        np_roi_0 = where(np.array(df_roi_0.to_list()))
+        np_roi_16 = where(np.array(df_roi_16.to_list()))
+        # map ROI hits to their associated genes (indices)
+        gns_roi_all = np.where(blk.dir==0,np_roi_0,np_roi_16)
+
+        if verbose:
+            print("match genes {0} ..".format(index+1))
+        # find the start and stop of the genes
+        np_start_0 = np.array(blk.apply(f_start_0, axis=1).to_list())
+        np_end_0 = np.array(blk.apply(f_end_0, axis=1).to_list())
+        np_start_16 = np.array(blk.apply(f_start_16, axis=1).to_list())
+        np_end_16 = np.array(blk.apply(f_end_16, axis=1).to_list())
+        # 
+        rp = np.repeat(gs,blk.shape[0],axis=0).reshape(4178,blk.shape[0]).transpose()
+        # find genes matches per strand
+        gns_0 = where( (np_start_0 & np_end_0) & (rp == 0))
+        gns_16 = where((np_start_16 & np_end_16) & (rp == 16))
+
+        # select the genes per strand
+        gns_all = np.where(blk.dir==0,gns_0,gns_16)
+        
+        # use gene definitions from ROI if no genes found
+        gns_all = np.where(gns_all>=0,gns_all,gns_roi_all)
+        
+        gns_match = gns_all>=0
+        
+        # copy the gene strings to frame
+
+        blk["gene"]=""
+        blk.loc[gns_match,"gene"]=gns_def.iloc[gns_all[gns_match]].gene.values
+        blk["gene_start"]=np.NaN
+        blk.loc[gns_match,"gene_start"]=GENESTART[gns_all[gns_match]]
+        blk["gene_stop"]=np.NaN
+        blk.loc[gns_match,"gene_stop"]=GENESTOP[gns_all[gns_match]]
+        
+        
+        def st2codon(row):
+            if row.dir==0:
+                _strt = row.gene_start
+                _codon = (row.begin_read - _strt) // 3
+                pos_from_start = row.begin_read - (_strt - 1)            
+            else:
+                _strt = row.gene_stop
+                _codon = (_strt - row.begin_read) // 3
+                pos_from_start = _strt -  row.begin_read
+                
+            return [pos_from_start,_codon]        
+
+        blk["gene_pos"]=np.NaN
+        blk['gene_codon']=np.NaN
+
+        if verbose:
+            print("determine position relative to start of gene {0} ..".format(index+1))    
+        
+        _aa =blk.loc[gns_match].apply(lambda x:st2codon(x),axis=1,result_type='expand')
+        blk.loc[gns_match,"gene_pos"]=_aa.iloc[:,0]
+        blk.loc[gns_match,"gene_codon"]=_aa.iloc[:,1]
+        
+        # for full datablock
+        blk["on_roi"]=gns_roi_all!=-1    
+
+        # reverse start/stop 
+        _tmp_start = np.where(blk.dir==0,blk.gene_start,blk.gene_stop)
+        _tmp_stop = np.where(blk.dir==0,blk.gene_stop,blk.gene_start)
+        
+        blk["gene_start"]=_tmp_start.copy()
+        blk["gene_stop"]=_tmp_stop.copy()
+
+        if verbose:
+            print('determining A site positions {0} ...'.format(index+1))
+        
+        blk['posAsite35']=blk.apply(lambda x:getAsiteData35(x.end_read,x.gene_start,x.dir,offset35),axis=1)
+        blk['posAsite53']=blk.apply(lambda x:getAsiteData53(x.begin_read,x.gene_start,x.dir,offset53),axis=1)
+            
+        if verbose:
+            print("augment with AA gene positions {0} ..".format(index+1))
+    
+        _arrAA = {}
+        for ii,aa in zip(range(len(AA_dict.keys())),AA_dict.keys()):
+            _arrAA[aa] = [NP_AA[g][ii] if g!=-1 else [] for g in gns_all]
+
+        df_AA = pd.DataFrame.from_dict(_arrAA,orient='columns')
+        # set the index otherwise empty rows
+        df_AA.index = blk.index
+
+        blk = pd.concat([blk,df_AA],axis=1)
+
+        np_coverage_normal = np.zeros((len(fasta_str),))
+        np_coverage_reverse = np.zeros((len(fasta_str),))
+        
+        def update_read_counts(strt:int,stp:int,strand:int):
+            if strand==0:
+                np_coverage_normal[range(strt-1,stp)]+=1
+            if strand==16:
+                np_coverage_reverse[range(strt-1,stp)]+=1
+
+        if verbose:
+            print('determining overall genome coverage {0} ..'.format(index+1))
+
+        blk.apply(lambda x:update_read_counts(x.left_pos,x.right_pos,x.dir),axis=1)
+
+        return blk, np_coverage_normal, np_coverage_reverse
+    
+    except Exception as me:
+        print("Memory error (block {0})".format(index), flush=True)
+        return -1, [], []    
+
+
 
 def process_sam_data(df_sam, fasta_str, gns_def, index=0,offset35:int=12,offset53:int=14):    
     '''
@@ -347,6 +532,9 @@ def process_sam_data(df_sam, fasta_str, gns_def, index=0,offset35:int=12,offset5
     df_select['gene'],df_select['gene_start'],df_select['gene_stop'],df_select['gene_pos'], \
         df_select['gene_codon'],df_select['on_roi'] = \
             zip(*map(ongene,df_select.begin_read,df_select.dir,df_select.read_len))
+    
+    
+    
     
     print('determining A site positions (block {0}) ...'.format(index+1))
     

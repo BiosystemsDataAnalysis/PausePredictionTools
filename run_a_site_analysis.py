@@ -10,10 +10,17 @@ from os.path import exists, dirname, realpath, basename, join
 from map_functions import *
 import multiprocessing
 from collections import Counter
+import psutil
+import resource
+import datatable as dt
+import threading
 
-required = {"ipython", "pandas","numpy","biopython","plotly","typed-argument-parser"}
+
+required = {"ipython", "pandas","numpy","biopython","plotly","typed-argument-parser","psutil"}
 installed = {pkg.key for pkg in pkg_resources.working_set}
 missing = required - installed
+
+lock = threading.Lock()
 
 if missing:
     python = sys.executable
@@ -72,6 +79,22 @@ def count_lines_in_file(file_name:str="")->int:
         count += 1
     return count
 
+    
+
+def len_headers_sam_file(sam_file):    
+    f = open(sam_file,'r')
+    print('determining headers sam file ... ')
+    headers = []
+    # determine number of header lines
+    for l in f:
+        if l.startswith('@'):
+            headers.append(l)
+        else:
+            break
+    f.close()
+    return len(headers)
+
+
 
 def get_sam_data_block(sam_file_name:str="", chunksize:int=10_000)->pd.DataFrame:
     
@@ -91,18 +114,27 @@ def get_sam_data_block(sam_file_name:str="", chunksize:int=10_000)->pd.DataFrame
     cols = ['C{0}'.format(i + 1) for i in range(20)]        
         
     for df_sam in pd.read_csv(sam_file, sep='\t', skiprows=nr_headers, header=None, names=cols, chunksize=chunksize, engine='python'):
+
+
         df_sam.rename(columns={'C5': 'qual', 'C10': 'sam_str', 'C2': 'dir', 'C4': 'left_pos', 'C11': 'phred_scores'},inplace=True)
         df_sam = df_sam.drop(['C6','C7','C8','C9','C12','C13','C14','C15','C16','C17','C18','C19','C20'],axis=1)
         yield df_sam
         
 
 
-def mythreadfunc_block(index,df_work,multi_dict_,d_normal,d_reverse,fasta_str,gns,sema,offset35:int=12,offset53:int=14):        
-    reg_out,nrm_out,rev_out = process_sam_data(df_work,fasta_str,gns, index, offset35,offset53)
-    multi_dict_[index] = reg_out
-    d_normal[index]=nrm_out
-    d_reverse[index]=rev_out
+def mythreadfunc_block(index,df_work,multi_dict_,d_normal,d_reverse,fasta_str,gns_dict,sema,offset35:int=12,offset53:int=14,verbose=True):        
+    
+    reg_out,nrm_out,rev_out = process_sam_vectorized(df_work,fasta_str,gns_dict, index, offset35,offset53,verbose)    
+    print("storing results for block {0}".format(index+1))    
+    
     sema.release()
+    
+    with lock:
+        multi_dict_[index] = reg_out
+        d_normal[index]=nrm_out
+        d_reverse[index]=rev_out
+
+   
 
 #%% define the plot functions
 
@@ -113,10 +145,10 @@ def detpos(vecdata, offset35:int=12,offset53:int=14):
 
     # print(offset53,offset35)
 
-    strand = vecdata[0]
-    start_read = vecdata[1]
-    read_len = vecdata[2]
-    position_I = vecdata[3]
+    strand = vecdata.iloc[0]
+    start_read = vecdata.iloc[1]
+    read_len = vecdata.iloc[2]
+    position_I = vecdata.iloc[3]
     
     stop_read = start_read + (read_len-1)
     if strand==16:
@@ -192,7 +224,7 @@ def createPlotData(df_data:pd.DataFrame, postfix="", cutoff_dist=20):
         else:
             df_wrk_plt = pd.concat([df_wrk_plt,df_wrk_plt_],axis=0)
 
-    combined_ = df_wrk_plt.groupby(['position','serie']).sum().reset_index()
+    combined_ = df_wrk_plt.groupby(['position','serie']).sum(numeric_only=True).reset_index()
     combined_['amino acid']='combined'
     df_wrk_plt = pd.concat([df_wrk_plt,combined_],axis=0)
     return df_wrk_plt[['position','amino acid','serie','counts']]
@@ -390,14 +422,15 @@ def make_ORF_plot(fname:str,_op:str, dfm:pd.DataFrame=None,filter:ORF_FILTER=ORF
     print("output file written to {0}".format(fname))
 
 
+def subval(vec,v):
+    return vec[0]-v
 
 def add_aa_scores(dfin:pd.DataFrame,aa:str='I',offset35:int=12,offset53:int=14):
     
     # copy I data vectors and determine distances to reads and I position, in detpos the offsets are determined 
     # they can be set by the global variables _offset53 and _offset35
-    cc = dfin[['dir','begin_read','read_len',aa]].apply(lambda x:detpos(x),axis=1)
-    ccc=cc.apply(pd.Series)
-    
+    ccc = dfin[['dir','begin_read','read_len',aa]].apply(lambda x:detpos(x),axis=1,result_type="expand")
+        
     col35_, col53_= aa+"35_"+str(offset35), aa+"35_"+str(offset53)
     ccc.columns = [col53_,col35_]
 
@@ -423,7 +456,7 @@ def add_aa_scores(dfin:pd.DataFrame,aa:str='I',offset35:int=12,offset53:int=14):
     return dfin
 
 #%% the main plot routine
-def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path="", sample_type:str="",offset35:int=12,offset53:int=14, orfplots:bool=False):
+def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path="", sample_type:str="",offset35:int=12,offset53:int=14, orfplots:bool=False, saveCsv:bool=False):
     kys_,cdns_ = get_genetic_code()
     
     output_file_name = join(output_path,pkl_file_name.replace(".pkl","_with_AAs.pkl"))
@@ -437,10 +470,15 @@ def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path=
         dfmapped_on_genes = dfw[~(dfw.gene=="")].copy()
         dfm = addORFinfo(dfmapped_on_genes)
         
-        print("adding distances for the different aminoacids ")
-        for k_ in kys_:            
+        lstkey = list(kys_)[-1]
+        print("adding distances for the different aminoacids .. ")
+        for k_ in kys_:       
+            if k_!=lstkey:
+                print("{0}, ".format(k_),end="", flush=True)     
+            else:
+                print("{0}".format(k_))
             dfm = add_aa_scores(dfm,k_)
-
+        
         print("storing data in {0}".format(output_file_name))
         dfm.to_pickle(output_file_name)
 
@@ -459,6 +497,9 @@ def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path=
     work_data = df_n_m
     plot_data = work_data[(work_data.position>=-offset35) & (work_data.position<=offset53)]
 
+    if saveCsv:
+        plot_data.to_csv(file_name_pickle.replace(".pkl","'csv"))
+
     if sample_type == "" :
         sample_type = pkl_file_name.replace(".pkl","")
 
@@ -475,7 +516,38 @@ def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path=
     fig.write_html(file_name_html)
     print("output written to {0}".format(file_name_html))
 
-   
+def refvariables(gns):
+     # prepare arrays for faster access 
+
+    AA_dict, _ = get_genetic_code()    
+
+    NP_AA = np.array([])
+    
+    for aa in AA_dict.keys():    
+        aa_list = np.array([l for l in gns[aa]],dtype=object)
+    
+        if(NP_AA.shape[0]==0):
+            NP_AA = aa_list
+        else:
+            NP_AA = np.column_stack((NP_AA,aa_list))
+
+    # create dictionary with numpy arrays for faster processing
+    gene_info = {'ROISTART':gns.ROI_START.to_numpy('int64'),'ROISTOP': gns.ROI_STOP.to_numpy('int64'),
+                'GENESTART':gns.start.to_numpy('int64'),'GENESTOP':gns.stop.to_numpy('int64'),
+                'GENESTRANDS': gns.strand.apply(lambda x: 0 if x == '+' else 16),'DEF':gns,
+                'NP_AA':NP_AA,'AA_DICT':AA_dict}
+    
+    return gene_info
+
+
+def limit_memory(maxperc=0.8): 
+    m = psutil.virtual_memory()
+    maxsize = int(m.total*maxperc)
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS) 
+    resource.setrlimit(resource.RLIMIT_AS, (maxsize, hard)) 
+
+
+# %% calling the main routine
 
 #%% the main routine for processing
 from tap import Tap # typed-argument-parser
@@ -486,7 +558,8 @@ interactive_mode = hasattr(sys, 'ps1')
 #fasta_file = "./reference_files/WT-Prspb-amyI-FASTA.fa"
 
 if interactive_mode:
-    sys.argv = ['script','--sam','data/1X_PEG-Spin_filtered_SAM.sam','--gff', 'reference_files/wt-prspb-amyI-GFF3.gff','--fa',r'reference_files/WT-Prspb-amyI-FASTA.fa']
+    sys.argv = ['script','--sam','demo/filtered_Histag_Standard.sam','--gff', 'reference_files/wt-prspb-amyI-GFF3.gff','--fa',r'reference_files/WT-Prspb-amyI-FASTA.fa','--nc','10','--nb','20']
+    # sys.argv = ['script','--sam','demo/demo_file.sam','--gff', 'reference_files/wt-prspb-amyI-GFF3.gff','--fa',r'reference_files/WT-Prspb-amyI-FASTA.fa','--nb','10']
 
 class myargs(Tap):
     
@@ -504,12 +577,18 @@ class myargs(Tap):
     op:str="" # output folder, if not specified same as folder where sam resides
     ow:bool=False # overwrite existing output
     orf:bool=False # include ORF plots
+    csv:bool=False # export to csv
+    verbose:bool=False # show extra logging information
+    lim:float=0.8 # set maximum memory limit, throws error if exceeded    
+    
 
 # semaphore from https://stackoverflow.com/questions/20886565/using-multiprocessing-process-with-a-maximum-number-of-simultaneous-processes
 # add this line for processing in multiple threads
 if __name__ ==  '__main__': 
-    
-    args = myargs().parse_args()        
+
+    args = myargs().parse_args()       
+    limit_memory(args.lim)
+ 
     sam_file_name = args.sam
     output_file_name = sam_file_name.lower().replace(".sam","_ASITE.pkl")
     sam_file_name_base = basename(args.sam)
@@ -565,31 +644,80 @@ if __name__ ==  '__main__':
         # determine block sizes based on number of blocks argument
 
         file_lines = count_lines_in_file(sam_file_name)
-        chuncksize = file_lines // nr_blocks    
+        chunksize = (file_lines//nr_blocks)
+        b = [i for i in range(0,file_lines,chunksize)]
+        bb = b[1:]+[file_lines]
+        
 
-        c = 0
-        for df_chunk in get_sam_data_block(sam_file_name, chunksize=chuncksize):
-            #  filter the reads with low mapping quality
-            _df_sam = df_chunk[df_chunk.qual >= args.mq].copy()
+        print("nrblocks {0}, len(b) {1}".format(nr_blocks,len(b)))
+
+        assert len(b) == nr_blocks, "Error defining block start positions"
+        assert len(bb) == nr_blocks, "Error defining block end positions"
+        assert(max(bb)==file_lines), "Error defining last block"
+
+        nrheaders = len_headers_sam_file(sam_file_name)                
+        dtSAM = dt.fread(sam_file_name,skip_to_line=nrheaders+1)
+        
+        colindex = [0,1,2,3,4,9,10]
+        colnames = ['x','dir','xx','left_pos','qual','sam_str','phred_scores']
+                                                        
+        # chunksize = (file_lines // nr_blocks)+1        
+        # print("chunksize = {0}".format(chunksize))
+                
+        # make dictionary with reference variables for faster access 
+        gene_info = refvariables(gns)       
+        
+        # lock = multiprocessing.Lock()
+
+        for i in range(nr_blocks):
+            _df_sam = dtSAM[b[i]:bb[i],colindex].to_pandas()
+            _df_sam.columns = colnames
+            _df_sam = _df_sam[_df_sam.qual >= args.mq].copy()                                             
             # countdown available semaphores
             sema.acquire()
-            _process = multiprocessing.Process(target=mythreadfunc_block, args=(c,_df_sam, multiprocessing_dict,dct_normal,dct_reverse,fasta_str,gns,sema,args.o35,args.o53))
-            c+=1
+            _process = multiprocessing.Process(target=mythreadfunc_block, args=(i,_df_sam, multiprocessing_dict,dct_normal,dct_reverse,fasta_str,gene_info,sema,args.o35,args.o53,myargs.verbose))            
             multiprocessing_loop_.append(_process)
             _process.start()
         
         for process_  in multiprocessing_loop_ :
             process_.join()
+                           
+        # for k in multiprocessing_dict.keys():
+        #    print("keys {0}".format(k))
+                              
+        blks2rerun = list(set([i for i in range(nr_blocks)]).difference(set(multiprocessing_dict.keys())))
+              
+        # # rerun missed blocks
+        
+        for i in blks2rerun:
+            _df_sam = dtSAM[b[i]:bb[i],colindex].to_pandas()
+            _df_sam.columns = colnames
+            _df_sam = _df_sam[_df_sam.qual >= args.mq].copy()                                             
+            # countdown available semaphores
+            sema = multiprocessing.Semaphore(1)
+            sema.acquire();
+            _process = multiprocessing.Process(target=mythreadfunc_block, args=(i,_df_sam, multiprocessing_dict,dct_normal,dct_reverse,fasta_str,gene_info,sema,args.o35,args.o53,args.verbose))                        
+            _process.start()
+            # wait for process to finish
+            _process.join()
+        
+            if type(multiprocessing_dict[i]) is int:
+                if multiprocessing_dict[i] == -1:
+                    print("Not enough memory to process block {0}, exiting ... ".format(chromosome))
+                    sys.exit(1)                                                      
+                
+        # for k in multiprocessing_dict.keys():
+        #     print("keys {0}".format(k))
         
         df = multiprocessing_dict[0].copy()
         normal_reads = dct_normal[0].copy()
         reverse_read = dct_reverse[0].copy()
         
-        for i in range(1,maxcpu):
-            if not(multiprocessing_dict[i] is None):
-                df = pd.concat([df,multiprocessing_dict[i]],axis=0)
-                normal_reads += dct_normal[i]
-                reverse_read += dct_reverse[i]
+        for k in range(1,nr_blocks):
+            df = pd.concat([df,multiprocessing_dict[k]],axis=0)
+            normal_reads += dct_normal[k]
+            reverse_read += dct_reverse[k]
+    
         
         df.to_pickle(output_file_full)
     
@@ -598,10 +726,12 @@ if __name__ ==  '__main__':
         df = pd.read_pickle(output_file_full)
 
 
-    make_plots(df, output_file_name,  overwrite=args.ow, output_path=dir_path, sample_type=args.title, offset35=args.o35, offset53=args.o53, orfplots=args.orf)
+    make_plots(df, output_file_name,  overwrite=args.ow, output_path=dir_path, sample_type=args.title, offset35=args.o35, offset53=args.o53, orfplots=args.orf, saveCsv=args.csv)
 
     if args.log:
         sys.stdout = temp_stdout
     
     print("finished..")
 
+
+# %%
