@@ -4,3 +4,6 @@
 **/output/
 **/demo/
 chkit.py
+*.pkl
+*.csv
+*.csv#
