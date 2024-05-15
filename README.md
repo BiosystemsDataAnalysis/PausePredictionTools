@@ -1,6 +1,6 @@
 # Python scripts to analyse a-site distributions in ribosomal profile data
 
-These scripts are not optimized for speed and are likely to be improved over time. 
+Not every script is optimized for speed and is likely to be improved over time. 
 
 
 ### genome = genome-build-accession NCBI_Assembly:GCF_000009045.1
