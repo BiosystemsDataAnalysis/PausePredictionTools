@@ -8,3 +8,4 @@ chkit.py
 *.csv
 *.csv#
 *.png
+**/.idea/
