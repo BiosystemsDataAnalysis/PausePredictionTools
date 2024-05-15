@@ -4,21 +4,38 @@
 
 import sys
 import subprocess
-import pkg_resources
+from importlib import metadata
+#import pkg_resources
 import tempfile   
 from os.path import exists, dirname, realpath, basename, join
 from map_functions import *
 import multiprocessing
 from collections import Counter
 import psutil
-import resource
+
+if sys.platform == "linux" or sys.platform == "linux2":    
+    import resource
+
+import h5py
+
 import datatable as dt
 import threading
 
+import time
+import os
+required = {"ipython", "resource","pandas","numpy","biopython","plotly","datatable","typed-argument-parser","psutil"}
 
-required = {"ipython", "pandas","numpy","biopython","plotly","typed-argument-parser","psutil"}
-installed = {pkg.key for pkg in pkg_resources.working_set}
-missing = required - installed
+def checkrequired():
+    missing = []
+    for r in required:
+        try:
+            metadata.version(r)
+        except:
+            missing.append(r)
+    
+    return missing
+
+missing = checkrequired()
 
 lock = threading.Lock()
 
@@ -36,6 +53,11 @@ from tap import Tap # typed-argument-parser
 import sys
 interactive_mode = hasattr(sys, 'ps1')
 from enum import IntEnum
+
+import pandas as pd 
+import warnings
+warnings.filterwarnings('ignore',category=pd.io.pytables.PerformanceWarning)
+
 
 #%% define the functions
 def load_fasta_file(fasta_file_loc:str=""):  
@@ -79,7 +101,6 @@ def count_lines_in_file(file_name:str="")->int:
         count += 1
     return count
 
-    
 
 def len_headers_sam_file(sam_file):    
     f = open(sam_file,'r')
@@ -94,194 +115,207 @@ def len_headers_sam_file(sam_file):
     f.close()
     return len(headers)
 
-
-
-def get_sam_data_block(sam_file_name:str="", chunksize:int=10_000)->pd.DataFrame:
     
-    sam_file = sam_file_name
-    f = open(sam_file,'r')
-    print('determining headers sam file ... ')
-    headers = []
-    # determine number of header lines
-    for l in f:
-        if l.startswith('@'):
-            headers.append(l)
-        else:
-            break
-    f.close()
-    nr_headers = len(headers)
-    
-    cols = ['C{0}'.format(i + 1) for i in range(20)]        
-        
-    for df_sam in pd.read_csv(sam_file, sep='\t', skiprows=nr_headers, header=None, names=cols, chunksize=chunksize, engine='python'):
-
-
-        df_sam.rename(columns={'C5': 'qual', 'C10': 'sam_str', 'C2': 'dir', 'C4': 'left_pos', 'C11': 'phred_scores'},inplace=True)
-        df_sam = df_sam.drop(['C6','C7','C8','C9','C12','C13','C14','C15','C16','C17','C18','C19','C20'],axis=1)
-        yield df_sam
-        
-
-
-def mythreadfunc_block(index,df_work,multi_dict_,d_normal,d_reverse,fasta_str,gns_dict,sema,offset35:int=12,offset53:int=14,verbose=True):        
-    
-    reg_out,nrm_out,rev_out = process_sam_vectorized(df_work,fasta_str,gns_dict, index, offset35,offset53,verbose)    
-    print("storing results for block {0}".format(index+1))    
-    
-    sema.release()
-    
-    with lock:
-        multi_dict_[index] = reg_out
-        d_normal[index]=nrm_out
-        d_reverse[index]=rev_out
-
-   
-
 #%% define the plot functions
 
-def detpos(vecdata, offset35:int=12,offset53:int=14):
-      
-    #/offset53=_offset53
-    #offset35=_offset35
-
-    # print(offset53,offset35)
-
-    strand = vecdata.iloc[0]
-    start_read = vecdata.iloc[1]
-    read_len = vecdata.iloc[2]
-    position_I = vecdata.iloc[3]
+def createPlotData_HDF(pDict:dict, postfix="", cutoff_dist=20):
     
-    stop_read = start_read + (read_len-1)
-    if strand==16:
-        stop_read = start_read - (read_len - 1)  
-
-    result_53 = [getAsiteData53(start_read,p,strand,offset53) for p in position_I]
-    result_35 = [getAsiteData35(stop_read,p,strand,offset35) for p in position_I]
-  
-    return [result_53,result_35]
-
-
-# add ORF 10% information
-def addORFinfo(df):
-    
-    orf_range = 0.05 # percentage 
-    df['gene_len']=np.abs(df['gene_stop']-df['gene_start'])
-    df['gene_orf_start_tenperc']=(df.dir==0)*(df.gene_start+np.round(df.gene_len*orf_range,0))+(df.dir==16)*(df.gene_start-np.round(df.gene_len*orf_range,0))
-    df['gene_orf_stop_tenperc']=(df.dir==0)*(df.gene_stop-np.round(df.gene_len*orf_range,0))+(df.dir==16)*(df.gene_stop+np.round(df.gene_len*orf_range,0))
-
-    df['within_90_ORF']=((df.dir==0) & ((df.begin_read >= df.gene_orf_start_tenperc) & (df.end_read<= df.gene_orf_stop_tenperc))) | \
-        ((df.dir==16) & ((df.begin_read <= df.gene_orf_start_tenperc) & (df.end_read>= df.gene_orf_stop_tenperc)))
-
-    return df
-
-
-def createPlotData(df_data:pd.DataFrame, postfix="", cutoff_dist=20):
     # i53vec_15_11 = list(chain(*df_data.minI53))
     # i35vec_15_11 = list(chain(*df_data.minI35))
 
-    aa_found = df_data.columns[df_data.columns.str.contains("min")]
-    aa_found = list(aa_found.str.strip("min53").unique())
+    print("create plotting data")
+    
+    with pd.HDFStore(pDict[PROJECT_INFO.STORE]) as hdf_store:
+                
+        init_df =  hdf_store.get("/augmented/block_0")
+        aa_found = init_df.columns[init_df.columns.str.contains("min")]
+        # remove characters m,i,n,5 and 3
+        aa_found_id = list(aa_found.str.strip("min53").unique())
+    
+        if len(aa_found)==0:
+            print("no distances to know AAs were found")
+            return None
+
+        #if "/raw_aa_plot_data" in hdf_store.keys():
+        try:
+            print("loading raw plot data from file")
+            df_data = hdf_store.get("/raw_aa_plot_data")            
+        except:
+            # load all data in array .. not actually a block function.. for later
+            print("processing plot data per block")
+            df_data = pd.DataFrame()
+            _keys = [k for k in hdf_store.keys() if k.startswith("/augmented/block_")]
+            for k in _keys:
+                df = hdf_store.get(k)                
+                df = df[['gene','within_90_ORF'] + aa_found.values.tolist()]
+                # remove entries that have no gene mapping
+                df = df[df.gene!=""]
+                if(df_data.shape[0]==0):
+                    df_data = df.copy()
+                else:            
+                    if not(df.empty):                           
+                        df_data = pd.concat([df_data,df],axis=0).copy()
+           
+            hdf_store.put("/raw_aa_plot_data",df_data)
+
         
-    df_wrk_plt = None
+        df_data_work = df_data.copy()
+
+        for filter in range(5):
+            # read filter data from store            
+
+            if filter==1:
+                filter_ = df_data.within_90_ORF
+            if filter==2:
+                morethan10 = hdf_store.get("/filter_morethan10")
+                filter_ = (df_data.gene.isin(morethan10.index.values)) & df_data.within_90_ORF            
+            if filter==3:    
+                morethan10 = hdf_store.get("/filter_morethan10")
+                top5_ = hdf_store.get("/filter_top5")
+                filter_ = ((df_data.gene.isin(morethan10.index.values))) & (df_data.within_90_ORF) & (~(df_data.gene.isin(top5_.index.values)))
+            if filter==4:
+                morethan10 = hdf_store.get("/filter_morethan10")
+                top10_ = hdf_store.get("/filter_top10")
+                filter_ = ((df_data.gene.isin(morethan10.index.values))) & (df_data.within_90_ORF) & (~(df_data.gene.isin(top10_.index.values)))
+        
+            if (filter>0):
+                df_data_work = df_data[filter_].copy()
+                
+            df_wrk_plt = None
     
-    if len(aa_found)==0:
-        print("no distances to know AAs were found")
-        return None
+            for AA in aa_found_id:
+                col53_,col35_ = "min" + AA + "53", "min" + AA + "35"
+                aa53vec_ = df_data_work[col53_]
+                aa35vec_ = df_data_work[col35_]
 
-    for AA in aa_found:
-        col53_,col35_ = "min" + AA + "53", "min" + AA + "35"
-        aa53vec_ = df_data[col53_]
-        aa35vec_ = df_data[col35_]
+                if postfix=="":
+                    colName = "5->3"
+                else:
+                    colName = "5->3 ({0})".format(postfix)
 
-        if postfix=="":
-            colName = "5->3"
-        else:
-            colName = "5->3 ({0})".format(postfix)
+                # make a frequency table
+                aa53_ = Counter(aa53vec_)
+                df_aa53 = pd.DataFrame.from_dict(aa53_,orient='index')
+                df_aa53.columns = [colName]
 
-        aa53_ = Counter(aa53vec_)
-        df_aa53 = pd.DataFrame.from_dict(aa53_,orient='index')
-        df_aa53.columns = [colName]
+                # make a frequency table
+                aa35_ = Counter(aa35vec_)
+                df_aa35 = pd.DataFrame.from_dict(aa35_,orient='index')
+                if postfix=="":
+                    colName = "3->5"
+                else:
+                    colName = "3->5 ({0})".format(postfix)        
 
-        aa35_ = Counter(aa35vec_)
-        df_aa35 = pd.DataFrame.from_dict(aa35_,orient='index')
-        if postfix=="":
-            colName = "3->5"
-        else:
-            colName = "3->5 ({0})".format(postfix)        
+                df_aa35.columns = [colName]
 
-        df_aa35.columns = [colName]
+                df_wrk_aa53 =df_aa53[(df_aa53.index>-cutoff_dist) & (df_aa53.index<cutoff_dist)]
+                df_wrk_aa35 =df_aa35[(df_aa35.index>-cutoff_dist) & (df_aa35.index<cutoff_dist)]
 
-        df_wrk_aa53 =df_aa53[(df_aa53.index>-cutoff_dist) & (df_aa53.index<cutoff_dist)]
-        df_wrk_aa35 =df_aa35[(df_aa35.index>-cutoff_dist) & (df_aa35.index<cutoff_dist)]
+                df_wrk = df_wrk_aa35.merge(df_wrk_aa53,left_index=True,right_index=True,how='outer')
 
-        df_wrk = df_wrk_aa35.merge(df_wrk_aa53,left_index=True,right_index=True,how='outer')
+                df_wrk_plt_= df_wrk.stack().reset_index()    
+                df_wrk_plt_.columns=['position','serie','counts']
+                df_wrk_plt_['amino acid']=AA
 
-        df_wrk_plt_= df_wrk.stack().reset_index()    
-        df_wrk_plt_.columns=['position','serie','counts']
-        df_wrk_plt_['amino acid']=AA
+                if df_wrk_plt is None:
+                    df_wrk_plt = df_wrk_plt_.copy()
+                else:
+                    df_wrk_plt = pd.concat([df_wrk_plt,df_wrk_plt_],axis=0)
 
-        if df_wrk_plt is None:
-            df_wrk_plt = df_wrk_plt_.copy()
-        else:
-            df_wrk_plt = pd.concat([df_wrk_plt,df_wrk_plt_],axis=0)
-
-    combined_ = df_wrk_plt.groupby(['position','serie']).sum(numeric_only=True).reset_index()
-    combined_['amino acid']='combined'
-    df_wrk_plt = pd.concat([df_wrk_plt,combined_],axis=0)
-    return df_wrk_plt[['position','amino acid','serie','counts']]
-
-
-def createReadDistData(df_data):
-    df_ret = df_data.groupby('read_len').count()['C1']    
-    return pd.DataFrame(df_ret)
-    # return pd.DataFrame(df_ret,columns=['frequency'])
+            combined_ = df_wrk_plt.groupby(['position','serie']).sum(numeric_only=True).reset_index()
+            combined_['amino acid']='combined'
+            df_wrk_plt = pd.concat([df_wrk_plt,combined_],axis=0)
+            # store tables
+            hdf_store.put("plotdata/filter_{0}".format(filter),df_wrk_plt[['position','amino acid','serie','counts']])
 
 
 
-def createAsiteDistributionPlotData(df_in:pd.DataFrame):
 
-    # create filters
-    genes_summary_ = df_in.groupby('gene').agg(['count','min'])['gene_len']      
+def createAsiteDistributionPlotData_HDF(pDict:dict):
+
+    with pd.HDFStore(pDict[PROJECT_INFO.STORE]) as hdf_store:
+    # load raw filter data only if necessary
+        if ("/genes_summary_" in hdf_store.keys()) and  ("/filter_morethan10" in hdf_store.keys()):            
+            print("load distribution summary data")
+            genes_summary_ = hdf_store.get("/genes_summary_")
+
+        else: # create filters
+            print("process distrubtion data per block")
+            genes_summary_= pd.DataFrame()
+            _keys = [k for k in hdf_store.keys() if k.startswith("/augmented/block_")]
+            for k in _keys:
+                df = hdf_store.get(k)
+                genes_summary__ = df.groupby('gene').agg(['count','min'])['gene_len']      
+
+                if(genes_summary_.shape[0]==0):
+                    genes_summary_ = genes_summary__.copy()
+                else:
+                    _df = genes_summary_.merge(genes_summary__,left_on=['gene'],right_on=['gene'],how='outer')
+                    _df['count'] = _df[['count_x','count_y']].sum(axis=1).astype('int')
+                    _df['min'] = _df[['min_x','min_y']].min(axis=1)            
+                    _df = _df.drop(['count_x','count_y','min_x','min_y'],axis=1).copy()
+                    genes_summary_ = _df.copy()
+            
+            hdf_store.put("/genes_summary_",genes_summary_)
+
+    # close hdf_store
+
+    with pd.HDFStore(pDict[PROJECT_INFO.STORE]) as hdf_store:
+        
+        if not("/filter_top5" in hdf_store.keys()): # assume the others are also created                    
+            print("calculate plotting filters")
+            # calculate relative frequency
+            genes_rel_=genes_summary_['count']/genes_summary_['min']
+            genes_rel_.name='relfreq'
+        
+            top5_ = genes_rel_.sort_values(ascending=False).iloc[0:5]
+            top10_ = genes_rel_.sort_values(ascending=False).iloc[0:10]
+            morethan10 = genes_summary_[genes_summary_['count']>10]        
+            
+            # store filters
+            hdf_store.put("/filter_top5",top5_)
+            hdf_store.put("/filter_top10",top10_)
+            hdf_store.put("/filter_morethan10",morethan10)
+        
+    # close hdf_store, recreate plot data from here
     
-    # calculate relative frequency
-    genes_rel_=genes_summary_['count']/genes_summary_['min']
-    genes_rel_.name='relfreq'
-    
-    top5_ = genes_rel_.sort_values(ascending=False).iloc[0:5]
-    top10_ = genes_rel_.sort_values(ascending=False).iloc[0:10]
-    morethan10 = genes_summary_[genes_summary_['count']>10]
+    createPlotData_HDF(pDict)        
 
-    all_reads = createPlotData(df_in)
-    all_reads['condition'] = 'all'
+    with pd.HDFStore(pDict[PROJECT_INFO.STORE]) as hdf_store:
+        all_reads = hdf_store.get("plotdata/filter_0")    
+        all_reads['condition'] = 'all'
+        df_reads_ = all_reads.copy()
 
-    df_reads_ = all_reads.copy()
+        reads_ORF_ = hdf_store.get("plotdata/filter_1")    
+        reads_ORF_['condition']= 'within 90% ORF'    
+        df_reads_ = pd.concat([df_reads_,reads_ORF_],axis=0)
 
-    reads_ORF_ = createPlotData(df_in[df_in.within_90_ORF])
-    reads_ORF_['condition']= 'within 90% ORF'    
-    df_reads_ = pd.concat([df_reads_,reads_ORF_],axis=0)
+        read_ORF_and_10 =  hdf_store.get("plotdata/filter_2")
+        read_ORF_and_10['condition'] = 'ORF + >10'
+        df_reads_ = pd.concat([df_reads_,read_ORF_and_10],axis=0)
 
-    filter = (df_in.gene.isin(morethan10.index.values)) & (df_in.within_90_ORF)
-    read_ORF_and_10 = createPlotData(df_in[filter])
-    read_ORF_and_10['condition'] = 'ORF + >10'
-    df_reads_ = pd.concat([df_reads_,read_ORF_and_10],axis=0)
-
-    filter = ((df_in.gene.isin(morethan10.index.values))) & (df_in.within_90_ORF) & (~(df_in.gene.isin(top5_.index.values)))
-    if (filter.sum()>0):
-        read_ORF_and_10_minTop5 = createPlotData(df_in[filter])
+        read_ORF_and_10_minTop5 =  hdf_store.get("plotdata/filter_3")
         read_ORF_and_10_minTop5['condition'] = 'ORF + >10 - top5'
         df_reads_ = pd.concat([df_reads_,read_ORF_and_10_minTop5],axis=0)
-    
-    
-    filter = ((df_in.gene.isin(morethan10.index.values))) & (df_in.within_90_ORF) & (~(df_in.gene.isin(top10_.index.values)))
-    if (filter.sum()>0):
-        read_ORF_and_10_minTop10 = createPlotData(df_in[filter])
+
+        read_ORF_and_10_minTop10 =  hdf_store.get("plotdata/filter_4")
         read_ORF_and_10_minTop10['condition'] = 'ORF + >10 - top10'
         df_reads_ = pd.concat([df_reads_,read_ORF_and_10_minTop10],axis=0)
     
     return df_reads_
+   
+
+class ORF_FILTER(IntEnum):
+    NONE = 0
+    MTOP10 = 1
+    MTOP20 = 2
+    MTOP50 = 3
+    L10 = 4
 
 
 
-def make_ORF_data(dataIn:pd.DataFrame,dir53:bool=True):
+
+def make_ORF_plot_data(dataIn:pd.DataFrame,dir53:bool=True):
 
     if dir53:
         _lbl = '5->3'
@@ -310,43 +344,60 @@ def make_ORF_data(dataIn:pd.DataFrame,dir53:bool=True):
     dataIn = dataIn[dataIn.direction=='35'].copy().drop(columns=['dir'],axis=1,inplace=True)
     
     return df_plot,total_plot
-   
 
-class ORF_FILTER(IntEnum):
-    NONE = 0
-    MTOP10 = 1
-    MTOP20 = 2
-    MTOP50 = 3
-    L10 = 4
 
-def prepare_ORF_plot_data(fname:str, dfm:pd.DataFrame, _op:str, filter:ORF_FILTER=ORF_FILTER.NONE):
+def prepare_ORF_plot_data_HDF(pDict:dict, filter:ORF_FILTER=ORF_FILTER.NONE):
+    #
+    # output_file_name = join(_op,file_prefix.replace("_ASITE.pkl","_ORF_unfiltered_data_HDF.pkl"))
     
-    output_file_name = join(_op,fname.replace("_ASITE.pkl","_ORF_unfiltered_data.pkl"))
-    if (exists(output_file_name)):
-        print("reading ORF data from previously generated results {0}".format(output_file_name))
-        dfm_tot = pd.read_pickle(output_file_name)
+    with pd.HDFStore(pDict[PROJECT_INFO.STORE]) as hdf_store:
     
-    else:
-        print("preparing data for ORF plots... ")
+        if "/orf_plot_data" in hdf_store.keys():    
+            print("reading ORF data from previously generated results")
+            dfm_tot = hdf_store.get("orf_plot_data")
     
-        dfm_35 = dfm.groupby(['posAsite35','dir','gene']).agg(['count','min'])['gene_len'].reset_index()
-        dfm_53 = dfm.groupby(['posAsite53','dir','gene']).agg(['count','min'])['gene_len'].reset_index()
+        else:
+            print("preparing data for ORF plots... ")
 
-        dfm_35['relfreq']=dfm_35['count']/dfm_35['min']
-        dfm_53['relfreq']=dfm_53['count']/dfm_53['min']
+            dfm_35 = dfm_53 = pd.DataFrame()
+
+            _keys = [k for k in hdf_store.keys() if k.startswith("/augmented/block_")]
+            _nblocks = pDict[PROJECT_INFO.NBLOCKS]
+            
+            assert len(_keys)==_nblocks, "file corruption error, not enough data blocks found"
+
+            for k in _keys:
+                df = hdf_store.get(k)
+                _dfm_35 = df.groupby(['posAsite35','dir','gene']).agg(['count','min'])['gene_len'].reset_index()
+                _dfm_53 = df.groupby(['posAsite53','dir','gene']).agg(['count','min'])['gene_len'].reset_index()
+                if(dfm_35.shape[0]==0):
+                    dfm_35 = _dfm_35.copy()
+                    dfm_53 = _dfm_53.copy()
+                else:
+                    _df = dfm_35.merge(_dfm_35,left_on=['posAsite35','dir','gene'],right_on=['posAsite35','dir','gene'],how='outer')
+                    _df['count'] = _df[['count_x','count_y']].sum(axis=1).astype('int')
+                    _df['min'] = _df[['min_x','min_y']].min(axis=1)
+                    dfm_35 = _df.drop(['count_x','count_y','min_x','min_y'],axis=1).copy()
+                    _df = dfm_53.merge(_dfm_53,left_on=['posAsite53','dir','gene'],right_on=['posAsite53','dir','gene'],how='outer')
+                    _df['count'] = _df[['count_x','count_y']].sum(axis=1).astype('int')
+                    _df['min'] = _df[['min_x','min_y']].min(axis=1)
+                    dfm_53 = _df.drop(['count_x','count_y','min_x','min_y'],axis=1).copy()
+        
+            dfm_35['relfreq']=dfm_35['count']/dfm_35['min']
+            dfm_53['relfreq']=dfm_53['count']/dfm_53['min']
+        
+            dfm_tot = pd.concat([dfm_35,dfm_53],axis=0)
+            dfm_tot['direction']=35
+            dfm_tot.loc[np.isnan(dfm_tot.posAsite35),'direction']=53
+            dfm_tot.direction=dfm_tot.direction.astype('int')
+
+            dfm_tot['posAsite'] = dfm_tot.posAsite53.fillna(0)+dfm_tot.posAsite35.fillna(0)
+            dfm_tot = dfm_tot.drop(columns=['posAsite35','posAsite53'],axis=1)
+
+            print("storing intermediate results to file.")
+            hdf_store.put("/orf_plot_data",dfm_tot)
+        
     
-
-        dfm_tot = pd.concat([dfm_35,dfm_53],axis=0)
-        dfm_tot['direction']=35
-        dfm_tot.loc[np.isnan(dfm_tot.posAsite35),'direction']=53
-        dfm_tot.direction=dfm_tot.direction.astype('int')
-
-        dfm_tot['posAsite'] = dfm_tot.posAsite53.fillna(0)+dfm_tot.posAsite35.fillna(0)
-        dfm_tot = dfm_tot.drop(columns=['posAsite35','posAsite53'],axis=1)
-
-        dfm_tot.to_pickle(output_file_name)
-
-
     #create datasets based on filter        
 
     # all data
@@ -384,8 +435,8 @@ def prepare_ORF_plot_data(fname:str, dfm:pd.DataFrame, _op:str, filter:ORF_FILTE
         df_pd_53 =  dfm_53[~dfm_53.gene.isin(more_than_10_53)]
 
     # create plot data, min top10
-    df_plot35, df_total35 = make_ORF_data(df_pd_35,False)
-    df_plot53, df_total53 = make_ORF_data(df_pd_53)
+    df_plot35, df_total35 = make_ORF_plot_data(df_pd_35,False)
+    df_plot53, df_total53 = make_ORF_plot_data(df_pd_53)
 
     # combine the 2 datasets to 1 figure, perhaps skip the detailed bars (df_plot35 & df_plot53)
     df_plot_total= pd.concat([df_total35,df_total53],axis=0)
@@ -394,9 +445,9 @@ def prepare_ORF_plot_data(fname:str, dfm:pd.DataFrame, _op:str, filter:ORF_FILTE
     return df_plot_total, df_plot_detail
 
 
-def make_ORF_plot(fname:str,_op:str, dfm:pd.DataFrame=None,filter:ORF_FILTER=ORF_FILTER.NONE):
+def make_ORF_plot_HDF(pDict:dict, filter:ORF_FILTER=ORF_FILTER.NONE):
     
-    df_total, df_detail = prepare_ORF_plot_data(fname, dfm, _op, filter)
+    df_total, df_detail = prepare_ORF_plot_data_HDF(pDict, filter)
 
     fig = px.bar(data_frame=df_detail,x='position',y='count',color="series", barmode='overlay')
     _flt = df_total.series == '3->5 (total)'
@@ -412,99 +463,39 @@ def make_ORF_plot(fname:str,_op:str, dfm:pd.DataFrame=None,filter:ORF_FILTER=ORF
     fig["layout"].pop("updatemenus") # optional, drop animation buttons
     fig.update_traces(dict(marker_line_width=0))
     # xaxis_dict = dict(tickmode = 'linear',tick0 = 0,dtick = 3)
-    fig.update_layout(title_text=_title)
+    fig.update_layout(title_text=_title)    
 
-    # fig.show()
-
-    fname=join(_op,fname.replace("_ASITE.pkl","_sCDS.html"))    
+    fname=join(pDict[PROJECT_INFO.OUTPATH],  pDict[PROJECT_INFO.BASENAME].replace(".sam","_sCDS_HDF.html"))    
     fig.write_html(fname)
-
+    
     print("output file written to {0}".format(fname))
 
-
-def subval(vec,v):
-    return vec[0]-v
-
-def add_aa_scores(dfin:pd.DataFrame,aa:str='I',offset35:int=12,offset53:int=14):
-    
-    # copy I data vectors and determine distances to reads and I position, in detpos the offsets are determined 
-    # they can be set by the global variables _offset53 and _offset35
-    ccc = dfin[['dir','begin_read','read_len',aa]].apply(lambda x:detpos(x),axis=1,result_type="expand")
-        
-    col35_, col53_= aa+"35_"+str(offset35), aa+"35_"+str(offset53)
-    ccc.columns = [col53_,col35_]
-
-    # find minimum distance between I and A-site ?
-    myvec = []
-    for x in ccc[col53_].values.tolist():
-        if(len(x)>0):
-            myvec.append(x[np.argmin(np.abs(x))])
-        else:        
-            myvec.append(None)
-
-    dfin["min"+ aa + "53"] = myvec
-
-    myvec = []
-    for x in ccc[col35_].values.tolist():
-        if(len(x)>0):
-            myvec.append(x[np.argmin(np.abs(x))])
-        else:        
-            myvec.append(None)
-
-    dfin["min"+ aa + "35"] = myvec
-
-    return dfin
-
 #%% the main plot routine
-def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path="", sample_type:str="",offset35:int=12,offset53:int=14, orfplots:bool=False, saveCsv:bool=False):
-    kys_,cdns_ = get_genetic_code()
+def make_plots_HDF(pDict:dict):
+        
+    ofile = os.path.join(pDict[PROJECT_INFO.OUTPATH],pDict[PROJECT_INFO.BASENAME])
     
-    output_file_name = join(output_path,pkl_file_name.replace(".pkl","_with_AAs.pkl"))
+    if pDict[PROJECT_INFO.ARGS].orf:    
+        make_ORF_plot_HDF(pDict,ORF_FILTER.NONE)
     
-    if (exists(output_file_name)) and (not(overwrite)):
-        print("reading input data from previously generated data {0}".format(output_file_name))
-        dfm = pd.read_pickle(output_file_name)
-    else:
-        
-        # focus on mapped to known genes only
-        dfmapped_on_genes = dfw[~(dfw.gene=="")].copy()
-        dfm = addORFinfo(dfmapped_on_genes)
-        
-        lstkey = list(kys_)[-1]
-        print("adding distances for the different aminoacids .. ")
-        for k_ in kys_:       
-            if k_!=lstkey:
-                print("{0}, ".format(k_),end="", flush=True)     
-            else:
-                print("{0}".format(k_))
-            dfm = add_aa_scores(dfm,k_)
-        
-        print("storing data in {0}".format(output_file_name))
-        dfm.to_pickle(output_file_name)
+    o53 = pDict[PROJECT_INFO.ARGS].o53
+    o35 = pDict[PROJECT_INFO.ARGS].o35
+    file_name_csv = ofile.replace(".sam","_plot_data_{0}_{1}.csv".format(o53,o35))
 
-    if orfplots:
-        make_ORF_plot(pkl_file_name,output_path,dfm,ORF_FILTER.NONE)
-    
-    file_name_pickle = output_file_name.replace(".pkl","plot_data_{0}_{1}.pkl".format(offset53,offset35))
-
-    if (exists(file_name_pickle)) and (not(overwrite)):
-        print("reading data from previously generated file {0}".format(file_name_pickle))
-        df_n_m = pd.read_pickle(file_name_pickle)
-    else:
-        df_n_m = createAsiteDistributionPlotData(dfm)
-        df_n_m.to_pickle(file_name_pickle)
+    df_n_m = createAsiteDistributionPlotData_HDF(pDict)
 
     work_data = df_n_m
-    plot_data = work_data[(work_data.position>=-offset35) & (work_data.position<=offset53)]
+    plot_data = work_data[(work_data.position>=-o35) & (work_data.position<=o53)]
 
-    if saveCsv:
-        plot_data.to_csv(file_name_pickle.replace(".pkl","'csv"))
+    if pDict[PROJECT_INFO.ARGS].csv:
+        plot_data.to_csv(file_name_csv)
 
-    if sample_type == "" :
-        sample_type = pkl_file_name.replace(".pkl","")
+    _title = pDict[PROJECT_INFO.ARGS].title
+    if _title == "" :
+        _title = pDict[PROJECT_INFO.BASENAME].replace(".sam","")
 
     _title = r"A-site position relative to first codon of different amino acids " + \
-    "in sample ({0}) determined with +{1}/-{2} offsets".format(sample_type,offset53,offset35)
+    "in sample ({0}) determined with +{1}/-{2} offsets".format(_title,o53,o35)
 
     fig = px.bar(data_frame=plot_data,x='position',y='counts',color='amino acid',facet_col="serie",animation_frame='condition', barmode='group')
     fig["layout"].pop("updatemenus") # optional, drop animation buttons
@@ -512,7 +503,7 @@ def make_plots(dfw:pd.DataFrame, pkl_file_name:str, overwrite:bool, output_path=
     xaxis_dict = dict(tickmode = 'linear',tick0 = 0,dtick = 3)
     fig.update_layout(title_text=_title,xaxis=xaxis_dict,xaxis2=xaxis_dict)
 
-    file_name_html = output_file_name.replace(".pkl","_all_{0}_{1}.html".format(offset53,offset35))
+    file_name_html = ofile.replace(".sam","_all_{0}_{1}.html".format(o53,o35))
     fig.write_html(file_name_html)
     print("output written to {0}".format(file_name_html))
 
@@ -547,19 +538,131 @@ def limit_memory(maxperc=0.8):
     resource.setrlimit(resource.RLIMIT_AS, (maxsize, hard)) 
 
 
-# %% calling the main routine
+#%%
+# https://stackoverflow.com/questions/41231678/obtaining-a-exclusive-lock-when-writing-to-an-hdf5-file
+
+class SafeHDF5Store(pd.HDFStore):
+    def __init__(self, *args, **kwargs):
+        interval   = kwargs.pop('probe_interval', 1)
+        # create lock file name
+        self._lock = "%s.lock" % args[0]
+        while True:
+            try:
+                # try to open lock file
+                self._flock = os.open(self._lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                # continue if suceeded
+                break
+            except (IOError, OSError):
+                # wait for a second                
+                time.sleep(interval)
+        pd.HDFStore.__init__(self, *args, **kwargs)
+
+    def __exit__(self, *args, **kwargs):
+        pd.HDFStore.__exit__(self, *args, **kwargs)
+        # close lock file
+        os.close(self._flock)
+        # remove lock file
+        os.remove(self._lock)        
+
+    def write_hdf(f, key, df):    
+        with SafeHDF5Store(f) as store:
+            # use the put option here instead of df.to_hdf because of type case issues
+            store.put(key,df)
+
+#%%
+def mythreadfunc_block_hdf(index, store_ptr, df_work, multi_dict_, d_normal, d_reverse, fasta_str, gns_dict, sema, offset35:int=12, offset53:int=14, verbose=True):        
+    
+    reg_out,nrm_out,rev_out = process_sam_vectorized(df_work,fasta_str,gns_dict, index, offset35,offset53,verbose)    
+    if verbose:
+        print("storing results for block {0}".format(index+1))    
+    
+    sema.release();
+        
+    with lock:
+
+        if verbose:
+            print("storing block to file {0}{1}".format(index,store_ptr))            
+        _block ="/augmented/block_{0}".format(index)
+        SafeHDF5Store.write_hdf(store_ptr,_block,reg_out)
+        multi_dict_[index] = index
+        d_normal[index]=nrm_out
+        d_reverse[index]=rev_out        
+        
+
+def store_hdf(data, name:str, group:str, filename):
+    # https://stackoverflow.com/questions/22922584/how-to-overwrite-array-inside-h5-file-using-h5py
+    # Read/write, file must exist
+    print("storing block data {0},{1},{2}".format(name,group,filename))
+    with h5py.File(filename, "r+") as f:
+        if not(group in f.keys()):
+            gr = f.create_group(group)
+        else:
+            gr = f.get(group)        
+            # create if not exising            
+            if not(name in gr.keys()):
+                gr.create_dataset(name,data)
+            _f = gr[name]
+            _f[...] = data
+            
+
+def get_hdf_items(filename,mainfld=""):    
+    folders = []
+    if exists(filename):
+        try:
+            with h5py.File(filename, "r") as f:
+                if mainfld!="":
+                    folders = [k for k in f.get(mainfld).keys() ]
+                else:
+                    folders = [k for k in f.keys() ]
+        except:
+            return []
+    return folders
+
+def get_hdf_item(filename,item=""):        
+    if exists(filename):
+        try:
+            with h5py.File(filename, "r") as f:
+                return f[item][()]
+        except:
+            return []
+    return []
+
+def get_hdf_attribute(filename,attr=""):
+    if(exists(filename)):
+        try:
+            with h5py.File(filename,"r") as f:
+                return f.attrs[attr]
+        except:
+            return "" 
+    return "" 
+
+def set_hdf_attribute(filename,val,attr=""):
+    if(exists(filename)):
+        try:
+            with h5py.File(filename,"r+") as f:
+                f.attrs[attr]=val
+        except:
+            pass
+        
+
+class PROJECT_INFO(IntEnum):
+    TITLE = 0
+    NBLOCKS = 1
+    ARGS = 2
+    STORE = 3
+    OUTPATH = 4
+    BASENAME = 5
+
 
 #%% the main routine for processing
 from tap import Tap # typed-argument-parser
 import sys
 interactive_mode = hasattr(sys, 'ps1')
 
-#gff_file = "./reference_files/wt-prspb-amyI-GFF3.gff"
-#fasta_file = "./reference_files/WT-Prspb-amyI-FASTA.fa"
-
 if interactive_mode:
-    sys.argv = ['script','--sam','demo/filtered_Histag_Standard.sam','--gff', 'reference_files/wt-prspb-amyI-GFF3.gff','--fa',r'reference_files/WT-Prspb-amyI-FASTA.fa','--nc','10','--nb','20']
-    # sys.argv = ['script','--sam','demo/demo_file.sam','--gff', 'reference_files/wt-prspb-amyI-GFF3.gff','--fa',r'reference_files/WT-Prspb-amyI-FASTA.fa','--nb','10']
+    #sys.argv = ['script','--sam','demo/filtered_Histag_Standard.sam','--gff', 'reference_files/wt-prspb-amyI-GFF3.gff','--fa',r'reference_files/WT-Prspb-amyI-FASTA.fa','--nc','10','--nb','100']
+    #sys.argv = ['script','--sam','demo/demo_file.sam','--gff', 'reference_files/wt-prspb-amyI-GFF3.gff','--fa',r'reference_files/WT-Prspb-amyI-FASTA.fa','--nb','10']
+    sys.argv = ['script','--sam','demo/demo_1.sam','--gff', 'reference_files/wt-prspb-amyI-GFF3.gff','--fa',r'reference_files/WT-Prspb-amyI-FASTA.fa']
 
 class myargs(Tap):
     
@@ -581,16 +684,21 @@ class myargs(Tap):
     verbose:bool=False # show extra logging information
     lim:float=0.8 # set maximum memory limit, throws error if exceeded    
     
-
+#%%
 # semaphore from https://stackoverflow.com/questions/20886565/using-multiprocessing-process-with-a-maximum-number-of-simultaneous-processes
 # add this line for processing in multiple threads
 if __name__ ==  '__main__': 
 
+    # define project dictionary for all settings
+    project_data = {}
+    
     args = myargs().parse_args()       
-    limit_memory(args.lim)
+    
+    if sys.platform == "linux" or sys.platform == "linux2":    
+        limit_memory(args.lim)
  
-    sam_file_name = args.sam
-    output_file_name = sam_file_name.lower().replace(".sam","_ASITE.pkl")
+    sam_file_name = args.sam    
+    output_file_name = sam_file_name.lower().replace(".sam","_results.h5")
     sam_file_name_base = basename(args.sam)
     nr_blocks = args.nb
 
@@ -614,11 +722,24 @@ if __name__ ==  '__main__':
         print("logging to file {0}".format(logfile))
         sys.stdout = open(logfile,'wt')
 
+    # remove the output file, otherwise it only grows
     if args.ow:
-        print("Overwriting exsiting output")
-    
-    if not(exists(output_file_full)) or (args.ow):
+        print("Overwriting exsiting output")        
+        os.remove(output_file_full)
 
+    
+    folders = get_hdf_items(output_file_full,"augmented")
+    nblocks = get_hdf_attribute(output_file_full,"nblocks")
+
+    project_data[PROJECT_INFO.NBLOCKS]=nblocks
+    project_data[PROJECT_INFO.STORE]=output_file_full
+    project_data[PROJECT_INFO.OUTPATH]=dir_path
+    project_data[PROJECT_INFO.BASENAME]=sam_file_name_base.lower()
+    project_data[PROJECT_INFO.ARGS]=args
+
+    if not(exists(output_file_full)) or (len(folders)==0) or (args.ow) or (nblocks!=len(folders)):
+        
+            
         fasta_str = load_fasta_file(args.fa)
         gns = load_gene_defs(fasta_str, args.gff)
                
@@ -634,7 +755,7 @@ if __name__ ==  '__main__':
             maxcpu = nr_blocks
                                     
         # create semaphore object 
-        sema = multiprocessing.Semaphore(concurrency)
+        sema = multiprocessing.Semaphore(concurrency);
             
         multiprocessing_dict = multiprocessing.Manager().dict()
         dct_normal = multiprocessing.Manager().dict()
@@ -648,8 +769,10 @@ if __name__ ==  '__main__':
         b = [i for i in range(0,file_lines,chunksize)]
         bb = b[1:]+[file_lines]
         
+        nr_blocks = len(bb)
 
-        print("nrblocks {0}, len(b) {1}".format(nr_blocks,len(b)))
+        # store number of blocks 
+        project_data[PROJECT_INFO.NBLOCKS]=nr_blocks
 
         assert len(b) == nr_blocks, "Error defining block start positions"
         assert len(bb) == nr_blocks, "Error defining block end positions"
@@ -658,76 +781,62 @@ if __name__ ==  '__main__':
         nrheaders = len_headers_sam_file(sam_file_name)                
         dtSAM = dt.fread(sam_file_name,skip_to_line=nrheaders+1)
         
+        # select variables of interest
         colindex = [0,1,2,3,4,9,10]
         colnames = ['x','dir','xx','left_pos','qual','sam_str','phred_scores']
-                                                        
-        # chunksize = (file_lines // nr_blocks)+1        
-        # print("chunksize = {0}".format(chunksize))
-                
+                                                                        
         # make dictionary with reference variables for faster access 
         gene_info = refvariables(gns)       
-        
-        # lock = multiprocessing.Lock()
-
+            
         for i in range(nr_blocks):
             _df_sam = dtSAM[b[i]:bb[i],colindex].to_pandas()
             _df_sam.columns = colnames
             _df_sam = _df_sam[_df_sam.qual >= args.mq].copy()                                             
             # countdown available semaphores
-            sema.acquire()
-            _process = multiprocessing.Process(target=mythreadfunc_block, args=(i,_df_sam, multiprocessing_dict,dct_normal,dct_reverse,fasta_str,gene_info,sema,args.o35,args.o53,myargs.verbose))            
+            sema.acquire();
+            _process = multiprocessing.Process(target=mythreadfunc_block_hdf, args=(i,output_file_full,_df_sam, multiprocessing_dict,dct_normal,dct_reverse,fasta_str,gene_info,sema,args.o35,args.o53,args.verbose))            
             multiprocessing_loop_.append(_process)
             _process.start()
         
         for process_  in multiprocessing_loop_ :
             process_.join()
-                           
-        # for k in multiprocessing_dict.keys():
-        #    print("keys {0}".format(k))
-                              
+                                                         
         blks2rerun = list(set([i for i in range(nr_blocks)]).difference(set(multiprocessing_dict.keys())))
               
-        # # rerun missed blocks
+        # rerun missed blocks in a single thread 
         
         for i in blks2rerun:
             _df_sam = dtSAM[b[i]:bb[i],colindex].to_pandas()
             _df_sam.columns = colnames
             _df_sam = _df_sam[_df_sam.qual >= args.mq].copy()                                             
-            # countdown available semaphores
+            # create only a single semaphore
             sema = multiprocessing.Semaphore(1)
             sema.acquire();
-            _process = multiprocessing.Process(target=mythreadfunc_block, args=(i,_df_sam, multiprocessing_dict,dct_normal,dct_reverse,fasta_str,gene_info,sema,args.o35,args.o53,args.verbose))                        
+            _process = multiprocessing.Process(target=mythreadfunc_block_hdf, args=(i,output_file_full,_df_sam, multiprocessing_dict,dct_normal,dct_reverse,fasta_str,gene_info,sema,args.o35,args.o53,args.verbose))                        
             _process.start()
             # wait for process to finish
             _process.join()
         
             if type(multiprocessing_dict[i]) is int:
                 if multiprocessing_dict[i] == -1:
-                    print("Not enough memory to process block {0}, exiting ... ".format(chromosome))
+                    print("Not enough memory to process block {0}, exiting ... ".format(i))
                     sys.exit(1)                                                      
                 
-        # for k in multiprocessing_dict.keys():
-        #     print("keys {0}".format(k))
+        # store nrblocks to attribute in hdf file
+        set_hdf_attribute(output_file_full,nr_blocks,"nblocks")
         
-        df = multiprocessing_dict[0].copy()
         normal_reads = dct_normal[0].copy()
         reverse_read = dct_reverse[0].copy()
         
-        for k in range(1,nr_blocks):
-            df = pd.concat([df,multiprocessing_dict[k]],axis=0)
+        for k in range(1,nr_blocks):            
             normal_reads += dct_normal[k]
-            reverse_read += dct_reverse[k]
-    
-        
-        df.to_pickle(output_file_full)
+            reverse_read += dct_reverse[k]            
     
     else:        
         print("reading from previous results {0}".format(output_file_full))
-        df = pd.read_pickle(output_file_full)
 
-
-    make_plots(df, output_file_name,  overwrite=args.ow, output_path=dir_path, sample_type=args.title, offset35=args.o35, offset53=args.o53, orfplots=args.orf, saveCsv=args.csv)
-
+    make_plots_HDF(project_data)
+                                       
     if args.log:
         sys.stdout = temp_stdout
     

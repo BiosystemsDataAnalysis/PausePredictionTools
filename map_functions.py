@@ -248,6 +248,72 @@ def get_gene_AAs(agene, aAA):
 
 
 
+# add ORF 10% information
+def addORFinfo(df):
+    
+    orf_range = 0.05 # percentage 
+    df['gene_len']=np.abs(df['gene_stop']-df['gene_start'])
+    df['gene_orf_start_tenperc']=(df.dir==0)*(df.gene_start+np.round(df.gene_len*orf_range,0))+(df.dir==16)*(df.gene_start-np.round(df.gene_len*orf_range,0))
+    df['gene_orf_stop_tenperc']=(df.dir==0)*(df.gene_stop-np.round(df.gene_len*orf_range,0))+(df.dir==16)*(df.gene_stop+np.round(df.gene_len*orf_range,0))
+
+    df['within_90_ORF']=((df.dir==0) & ((df.begin_read >= df.gene_orf_start_tenperc) & (df.end_read<= df.gene_orf_stop_tenperc))) | \
+        ((df.dir==16) & ((df.begin_read <= df.gene_orf_start_tenperc) & (df.end_read>= df.gene_orf_stop_tenperc)))
+
+    return df
+
+
+def detpos(vecdata, offset35:int=12,offset53:int=14):
+      
+    #/offset53=_offset53
+    #offset35=_offset35
+
+    # print(offset53,offset35)
+
+    strand = vecdata.iloc[0]
+    start_read = vecdata.iloc[1]
+    read_len = vecdata.iloc[2]
+    position_I = vecdata.iloc[3]
+    
+    stop_read = start_read + (read_len-1)
+    if strand==16:
+        stop_read = start_read - (read_len - 1)  
+
+    result_53 = [getAsiteData53(start_read,p,strand,offset53) for p in position_I]
+    result_35 = [getAsiteData35(stop_read,p,strand,offset35) for p in position_I]
+  
+    return [result_53,result_35]
+
+
+def add_aa_scores(dfin:pd.DataFrame,aa:str='I',offset35:int=12,offset53:int=14):
+    
+    # copy I data vectors and determine distances to reads and I position, in detpos the offsets are determined 
+    # they can be set by the global variables _offset53 and _offset35
+    ccc = dfin[['dir','begin_read','read_len',aa]].apply(lambda x:detpos(x),axis=1,result_type="expand")
+        
+    col35_, col53_= aa+"35_"+str(offset35), aa+"35_"+str(offset53)
+    ccc.columns = [col53_,col35_]
+
+    # find minimum distance between I and A-site 
+    myvec = []
+    for x in ccc[col53_].values.tolist():
+        if(len(x)>0):
+            myvec.append(x[np.argmin(np.abs(x))])
+        else:        
+            myvec.append(None)
+
+    dfin["min"+ aa + "53"] = myvec
+
+    myvec = []
+    for x in ccc[col35_].values.tolist():
+        if(len(x)>0):
+            myvec.append(x[np.argmin(np.abs(x))])
+        else:        
+            myvec.append(None)
+
+    dfin["min"+ aa + "35"] = myvec
+
+    return dfin
+
 
 def where(arr):
     # check for those items that are empty
@@ -374,8 +440,10 @@ def process_sam_vectorized(blk_in, fasta_str, gns_info, index=0,offset35:int=12,
             print("determine position relative to start of gene {0} ..".format(index+1))    
         
         _aa =blk.loc[gns_match].apply(lambda x:st2codon(x),axis=1,result_type='expand')
-        blk.loc[gns_match,"gene_pos"]=_aa.iloc[:,0]
-        blk.loc[gns_match,"gene_codon"]=_aa.iloc[:,1]
+        # check if there are any genes matched in this block (happens with small blocks)
+        if _aa.shape[0]>0:
+            blk.loc[gns_match,"gene_pos"]=_aa.iloc[:,0]
+            blk.loc[gns_match,"gene_codon"]=_aa.iloc[:,1]
         
         # for full datablock
         blk["on_roi"]=gns_roi_all!=-1    
@@ -416,9 +484,24 @@ def process_sam_vectorized(blk_in, fasta_str, gns_info, index=0,offset35:int=12,
                 np_coverage_reverse[range(strt-1,stp)]+=1
 
         if verbose:
-            print('determining overall genome coverage {0} ..'.format(index+1))
+            print('determining overall genome coverage {0} ..'.format(index+1))        
 
         blk.apply(lambda x:update_read_counts(x.left_pos,x.right_pos,x.dir),axis=1)
+
+        blk = addORFinfo(blk)
+        # find lastkey (for printing)
+        # lstkey = list(AA_dict.keys())[-1]
+        
+        if verbose:
+            print("adding distances for the different aminoacids {0} .. ".format(index+1))
+        for k_ in AA_dict.keys():       
+            # if verbose:
+            #     if k_!=lstkey:
+            #         print("{0}, ".format(k_),end="", flush=True)     
+            #     else:
+            #         print("{0}".format(k_))
+            blk = add_aa_scores(blk,k_)
+    
 
         return blk, np_coverage_normal, np_coverage_reverse
     
