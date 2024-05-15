@@ -9,7 +9,7 @@ These scripts are not optimized for speed and are likely to be improved over tim
 
 ### RUN_A_SITE_ANALYSIS.PY, visualize the amino acid distributions of reads around the open reading frame of genes
 
-usage: run_a_site_analysis.py --sam SAM --gff GFF --fa FA [--nc NC] [--nb NB] [--mq MQ] [--o53 O53] [--o35 O35] [--title TITLE] [--log] [--op OP] [--orf] [-h]  
+usage: run_a_site_analysis.py --sam SAM --gff GFF --fa FA [--nc NC] [--nb NB] [--mq MQ] [--o53 O53] [--o35 O35] [--title TITLE] [--log] [--op OP] [--ow] [--orf] [--csv] [--verbose] [--lim LIM] [-h]
 
 options:  
   --sam SAM      (str, required) the input sam(or bam) file  
@@ -28,6 +28,7 @@ options:
   --verbose:     (bool, default=False) # show extra logging information, useful for debugging
   --lim          (float, default=0.8) # set memory limit, throws error if exceeded    
   -h, --help     show this help message and exit  
+
 
 ### ALT_PREDICT_V2.PY, alternative pause prediction tool to Ribogalaxy
 
