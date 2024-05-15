@@ -7,3 +7,4 @@ chkit.py
 *.pkl
 *.csv
 *.csv#
+*.png
