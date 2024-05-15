@@ -180,55 +180,63 @@ def createPlotData_HDF(pDict:dict, postfix="", cutoff_dist=20):
         
             if (filter>0):
                 df_data_work = df_data[filter_].copy()
-                
-            df_wrk_plt = None
-    
+                            
+            df_wrk_plt_export = None
             for AA in aa_found_id:
                 col53_,col35_ = "min" + AA + "53", "min" + AA + "35"
-                aa53vec_ = df_data_work[col53_]
-                aa35vec_ = df_data_work[col35_]
+                
+                # aa53vec_ = df_data_work[col53_]
+                # aa35vec_ = df_data_work[col35_]                
 
                 if postfix=="":
-                    colName = "5->3"
+                    colName53 = "5->3"
+                    colName35 = "3->5"
                 else:
-                    colName = "5->3 ({0})".format(postfix)
-
-                # make a frequency table
-                aa53_ = Counter(aa53vec_)
-                df_aa53 = pd.DataFrame.from_dict(aa53_,orient='index')
-                df_aa53.columns = [colName]
-
-                # make a frequency table
-                aa35_ = Counter(aa35vec_)
-                df_aa35 = pd.DataFrame.from_dict(aa35_,orient='index')
-                if postfix=="":
-                    colName = "3->5"
+                    colName53 = "5->3 ({0})".format(postfix)
+                    colName35 = "3->5 ({0})".format(postfix)
+                    
+                # make a frequency tables
+                df_aa53_new  = df_data_work[col53_].value_counts().to_frame()
+                df_aa53_new.columns = [colName53]
+                                
+                df_aa35_new  =  df_data_work[col35_].value_counts().to_frame()                
+                df_aa35_new.columns = [colName35]
+                               
+                # initialize full vector
+                df_wrk_aa35_new = pd.DataFrame(index=range(-cutoff_dist,cutoff_dist+1),data=np.zeros((cutoff_dist*2+1,1)),columns=['3->5'])
+                # filter for cutoff distance
+                df_wrk_aa35_ = df_aa35_new.loc[ (df_aa35_new.index>-cutoff_dist) & (df_aa35_new.index<cutoff_dist)]
+                # combine both
+                df_wrk35_new = df_wrk_aa35_new.add(df_wrk_aa35_,fill_value=0)
+                
+                # initialize full vector
+                df_wrk_aa53_new = pd.DataFrame(index=range(-cutoff_dist,cutoff_dist+1),data=np.zeros((cutoff_dist*2+1,1)),columns=['5->3'])
+                # filter for cutoff distance
+                df_wrk_aa53_ = df_aa53_new.loc[ (df_aa53_new.index>-cutoff_dist) & (df_aa53_new.index<cutoff_dist)]
+                # combine both
+                df_wrk53_new = df_wrk_aa53_new.add(df_wrk_aa53_,fill_value=0)
+                      
+                # combine 53 and 35 series for the AA
+                df_wrk_new = df_wrk35_new.merge(df_wrk53_new,left_index=True,right_index=True,how='outer')
+                # stack results to appropriate for plotting
+                df_wrt_plt_new = df_wrk_new.stack().reset_index()
+                # rename columns for plotting options
+                df_wrt_plt_new.columns=['position','serie','counts']
+                # assign for the current Amino Acid
+                df_wrt_plt_new['amino acid']=AA
+                
+                # concatenate plot results                    
+                if df_wrk_plt_export is None:
+                    df_wrk_plt_export = df_wrt_plt_new.copy()
                 else:
-                    colName = "3->5 ({0})".format(postfix)        
-
-                df_aa35.columns = [colName]
-
-                df_wrk_aa53 =df_aa53[(df_aa53.index>-cutoff_dist) & (df_aa53.index<cutoff_dist)]
-                df_wrk_aa35 =df_aa35[(df_aa35.index>-cutoff_dist) & (df_aa35.index<cutoff_dist)]
-
-                df_wrk = df_wrk_aa35.merge(df_wrk_aa53,left_index=True,right_index=True,how='outer')
-
-                df_wrk_plt_= df_wrk.stack().reset_index()    
-                df_wrk_plt_.columns=['position','serie','counts']
-                df_wrk_plt_['amino acid']=AA
-
-                if df_wrk_plt is None:
-                    df_wrk_plt = df_wrk_plt_.copy()
-                else:
-                    df_wrk_plt = pd.concat([df_wrk_plt,df_wrk_plt_],axis=0)
-
-            combined_ = df_wrk_plt.groupby(['position','serie']).sum(numeric_only=True).reset_index()
-            combined_['amino acid']='combined'
-            df_wrk_plt = pd.concat([df_wrk_plt,combined_],axis=0)
+                    df_wrk_plt_export = pd.concat([df_wrk_plt_export,df_wrt_plt_new],axis=0)                                     
+            
+            combined_new = df_wrk_plt_export.groupby(['position','serie']).sum(numeric_only=True).reset_index()
+            combined_new['amino acid']='combined'
+            df_wrk_plt_export = pd.concat([df_wrk_plt_export,combined_new],axis=0)
+            
             # store tables
-            hdf_store.put("plotdata/filter_{0}".format(filter),df_wrk_plt[['position','amino acid','serie','counts']])
-
-
+            hdf_store.put("plotdata/filter_{0}".format(filter),df_wrk_plt_export[['position','amino acid','serie','counts']])
 
 
 def createAsiteDistributionPlotData_HDF(pDict:dict):
@@ -472,7 +480,7 @@ def make_ORF_plot_HDF(pDict:dict, filter:ORF_FILTER=ORF_FILTER.NONE):
 
 #%% the main plot routine
 def make_plots_HDF(pDict:dict):
-        
+                
     ofile = os.path.join(pDict[PROJECT_INFO.OUTPATH],pDict[PROJECT_INFO.BASENAME])
     
     if pDict[PROJECT_INFO.ARGS].orf:    
@@ -486,6 +494,7 @@ def make_plots_HDF(pDict:dict):
 
     work_data = df_n_m
     plot_data = work_data[(work_data.position>=-o35) & (work_data.position<=o53)]
+   
 
     if pDict[PROJECT_INFO.ARGS].csv:
         plot_data.to_csv(file_name_csv)
@@ -493,7 +502,7 @@ def make_plots_HDF(pDict:dict):
     _title = pDict[PROJECT_INFO.ARGS].title
     if _title == "" :
         _title = pDict[PROJECT_INFO.BASENAME].replace(".sam","")
-
+                
     _title = r"A-site position relative to first codon of different amino acids " + \
     "in sample ({0}) determined with +{1}/-{2} offsets".format(_title,o53,o35)
 
@@ -505,7 +514,45 @@ def make_plots_HDF(pDict:dict):
 
     file_name_html = ofile.replace(".sam","_all_{0}_{1}.html".format(o53,o35))
     fig.write_html(file_name_html)
-    print("output written to {0}".format(file_name_html))
+    print("output written to {0}".format(file_name_html))        
+               
+    separate = False
+    # if separate plots are needed
+    if separate:
+        # from 5->3
+        p53 = plot_data.loc[plot_data.serie=="5->3"] 
+        p53_all_aa = p53.loc[p53.condition=="all"]
+        _title53 = r"A-site position relative to first codon of different amino acids " + \
+        "in sample ({0}) determined from 5->3 with +{1} offset".format(_title,o53)
+        
+        fig = px.bar(data_frame=p53,x='position',y='counts',color='amino acid',animation_frame='condition', barmode='group')
+        fig["layout"].pop("updatemenus") # optional, drop animation buttons
+        fig.update_traces(dict(marker_line_width=0))
+        xaxis_dict = dict(tickmode = 'linear',tick0 = 0,dtick = 3)
+        fig.update_layout(title_text=_title53,xaxis=xaxis_dict,xaxis2=xaxis_dict)
+
+        file_name_html = ofile.replace(".sam","_all_53_{0}.html".format(o53,o35))
+        fig.write_html(file_name_html)
+        
+        print("output written to {0}".format(file_name_html))
+        
+        # from 3->5    
+        
+        p35 = plot_data.loc[plot_data.serie=="3->5"]
+        _title35 = r"A-site position relative to first codon of different amino acids " + \
+        "in sample ({0}) determined from 3->5 with -{1} offset".format(_title,o35)
+    
+        fig = px.bar(data_frame=p35,x='position',y='counts',color='amino acid',animation_frame='condition', barmode='group')
+        fig["layout"].pop("updatemenus") # optional, drop animation buttons
+        fig.update_traces(dict(marker_line_width=0))
+        xaxis_dict = dict(tickmode = 'linear',tick0 = 0,dtick = 3)
+        fig.update_layout(title_text=_title35,xaxis=xaxis_dict,xaxis2=xaxis_dict)
+
+        file_name_html = ofile.replace(".sam","_all_35_{0}.html".format(o35))
+        fig.write_html(file_name_html)
+        
+        print("output written to {0}".format(file_name_html))
+
 
 def refvariables(gns):
      # prepare arrays for faster access 
