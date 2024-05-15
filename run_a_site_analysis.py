@@ -437,27 +437,7 @@ def prepare_ORF_plot_data_HDF(pDict:dict, filter:ORF_FILTER=ORF_FILTER.NONE):
                 _df['count'] = _df[['count_x','count_y']].sum(axis=1).astype('int')
                 _df['min'] = _df[['min_x','min_y']].min(axis=1)
                 dfm_53 = _df.drop(['count_x','count_y','min_x','min_y'],axis=1).copy()
-                    
-                # dfm_35 = orf_dict[_keys[k]][0].drop(['count_x','count_y','min_x','min_y'],axis=1).copy()
-                # dfm_53 = orf_dict[_keys[k]][1].drop(['count_x','count_y','min_x','min_y'],axis=1).copy()
-            
-           
-            # for k in _keys:
-            #     df = hdf_store.get(k)
-            #     _dfm_35 = df.groupby(['posAsite35','dir','gene']).agg(['count','min'])['gene_len'].reset_index()
-            #     _dfm_53 = df.groupby(['posAsite53','dir','gene']).agg(['count','min'])['gene_len'].reset_index()
-            #     if(dfm_35.shape[0]==0):
-            #         dfm_35 = _dfm_35.copy()
-            #         dfm_53 = _dfm_53.copy()
-            #     else:
-            #         _df = dfm_35.merge(_dfm_35,left_on=['posAsite35','dir','gene'],right_on=['posAsite35','dir','gene'],how='outer')
-            #         _df['count'] = _df[['count_x','count_y']].sum(axis=1).astype('int')
-            #         _df['min'] = _df[['min_x','min_y']].min(axis=1)
-            #         dfm_35 = _df.drop(['count_x','count_y','min_x','min_y'],axis=1).copy()
-            #         _df = dfm_53.merge(_dfm_53,left_on=['posAsite53','dir','gene'],right_on=['posAsite53','dir','gene'],how='outer')
-            #         _df['count'] = _df[['count_x','count_y']].sum(axis=1).astype('int')
-            #         _df['min'] = _df[['min_x','min_y']].min(axis=1)
-            #         dfm_53 = _df.drop(['count_x','count_y','min_x','min_y'],axis=1).copy()
+                             
         
             dfm_35['relfreq']=dfm_35['count']/dfm_35['min']
             dfm_53['relfreq']=dfm_53['count']/dfm_53['min']
@@ -470,10 +450,9 @@ def prepare_ORF_plot_data_HDF(pDict:dict, filter:ORF_FILTER=ORF_FILTER.NONE):
             dfm_tot['posAsite'] = dfm_tot.posAsite53.fillna(0)+dfm_tot.posAsite35.fillna(0)
             dfm_tot = dfm_tot.drop(columns=['posAsite35','posAsite53'],axis=1)
 
-            print("storing intermediate results to file.")
+            print("storing intermediate results to file.")            
             hdf_store.put("/orf_plot_data",dfm_tot)
         
-    
     #create datasets based on filter        
 
     # all data
